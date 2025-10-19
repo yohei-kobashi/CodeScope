@@ -181,3 +181,15 @@ Kotlin 1.6:
 Kotlin 1.7:
     nofile: 25
     nproc: 23
+
+D:
+    nofile: 4
+
+Perl:
+    nofile: 4
+
+Delphi:
+    cpu: 4
+    _as: 4294967296
+    nofile: 16
+    nproc: 2

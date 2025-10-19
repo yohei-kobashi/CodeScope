@@ -92,6 +92,18 @@ generic_rust_go_compile = lambda s, cmd, flags: (
     s.parent / f"{s.stem}",
 )
 
+# D (LDC) compile helper: emit named binary explicitly with -of
+generic_d_compile = lambda s, cmd, flags: (
+    f"{cmd} {flags} -of={s.stem} {s.name}",
+    s.parent / f"{s.stem}",
+)
+
+# Free Pascal (Delphi mode) compile helper
+generic_pascal_compile = lambda s, cmd, flags: (
+    f"{cmd} {flags} -FE. -o {s.stem} {s.name}",
+    s.parent / f"{s.stem}",
+)
+
 
 class JavaClassNotFoundError(Exception):
     msg: str
@@ -125,3 +137,7 @@ generic_java_execute = (
 generic_kotlin_execute = (
     lambda x, cmd, flags: f"{cmd} {flags} {str(x)}"
 )
+
+# Perl helpers (aliases of generic interpreted ones)
+generic_perl_compile = generic_interpreted_compile
+generic_perl_execute = generic_interpreted_execute

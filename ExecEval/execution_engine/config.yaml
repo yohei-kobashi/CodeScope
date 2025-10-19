@@ -311,6 +311,30 @@ supported_languages:
         execute_fn_name: generic_binary_execute
         file_name_fn_or_str_name: test.rs
 
+    D:
+        compile_cmd: ldc2
+        compile_flags: -O -release -boundscheck=off
+        compile_fn_name: generic_d_compile
+        execute_fn_name: generic_binary_execute
+        file_name_fn_or_str_name: test.d
+
+    Delphi:
+        compile_cmd: fpc
+        compile_flags: -Mdelphi -O2 -Xs
+        compile_fn_name: generic_pascal_compile
+        execute_fn_name: generic_binary_execute
+        file_name_fn_or_str_name: test.pas
+        timelimit_factor: 1
+
+    Perl:
+        compile_cmd: perl
+        compile_flags: -c
+        execute_cmd: perl
+        compile_fn_name: generic_perl_compile
+        execute_fn_name: generic_perl_execute
+        file_name_fn_or_str_name: test.pl
+        timelimit_factor: 3
+
     Java 6:
         compile_cmd: javac
         compile_flags: -target 1.6 -nowarn -cp ".;*"
