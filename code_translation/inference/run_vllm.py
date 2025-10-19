@@ -2,7 +2,7 @@ import argparse
 import logging
 import warnings
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Sequence
+from typing import Any, Dict, Iterable, List, Optional, Sequence
 
 from datasets import Dataset, load_dataset
 from vllm import LLM, SamplingParams
@@ -112,6 +112,50 @@ def count_tokens(tokenizer, text: str) -> int:
     return len(token_ids)
 
 
+def _normalize_dtype_name(dtype_value: Any) -> Optional[str]:
+    if dtype_value is None:
+        return None
+    if isinstance(dtype_value, str):
+        dtype_str = dtype_value
+    else:
+        dtype_str = str(dtype_value)
+    dtype_str = dtype_str.replace('torch.', '').replace('torch', '').strip().lower()
+    if dtype_str == 'float':
+        dtype_str = 'float32'
+    return dtype_str or None
+
+
+def infer_model_dtype(model_id: str, dtype_arg: Optional[str], trust_remote_code: bool,
+                      cache_dir: Optional[str]) -> Optional[str]:
+    if dtype_arg and dtype_arg.lower() != 'auto':
+        return dtype_arg
+
+    try:
+        from transformers import AutoConfig  # type: ignore
+    except Exception:
+        logging.warning('transformers not available; defaulting dtype to float16.')
+        return 'float16'
+
+    try:
+        config = AutoConfig.from_pretrained(
+            model_id,
+            trust_remote_code=trust_remote_code,
+            cache_dir=cache_dir,
+        )
+    except Exception as exc:
+        logging.warning('Failed to load model config for dtype detection (%s); defaulting to float16.', exc)
+        return 'float16'
+
+    config_dtype = getattr(config, 'torch_dtype', None) or getattr(config, 'dtype', None)
+    normalized = _normalize_dtype_name(config_dtype)
+    if not normalized:
+        logging.warning('Model config does not specify torch_dtype; defaulting to float16.')
+        return 'float16'
+
+    logging.info('Auto-detected dtype=%s from model config.', normalized)
+    return normalized
+
+
 def batched(iterable: Sequence[Any], batch_size: int) -> Iterable[Sequence[Any]]:
     for start_idx in range(0, len(iterable), batch_size):
         yield iterable[start_idx:start_idx + batch_size]
@@ -124,6 +168,14 @@ def main() -> None:
     dataset = load_dataset('json', split='train', data_files=str(load_path))
     dataset.cleanup_cache_files()
     records: List[Dict[str, Any]] = dataset.to_list()
+
+    resolved_dtype = infer_model_dtype(
+        args.model,
+        args.dtype,
+        args.trust_remote_code,
+        args.download_dir,
+    )
+    args.dtype = resolved_dtype
 
     llm = LLM(
         model=args.model,
