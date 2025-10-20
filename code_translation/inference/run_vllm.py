@@ -8,6 +8,19 @@ from datasets import Dataset, load_dataset
 from vllm import LLM, SamplingParams
 
 
+def _str_to_bool(value: Optional[str]) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return True
+    lowered = value.strip().lower()
+    if lowered in {'true', 't', 'yes', 'y', '1'}:
+        return True
+    if lowered in {'false', 'f', 'no', 'n', '0'}:
+        return False
+    raise argparse.ArgumentTypeError(f'Invalid boolean value: {value}')
+
+
 def parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument('--model', default='codellama/CodeLlama-7b-Instruct-hf', type=str,
@@ -36,6 +49,10 @@ def parse_arguments() -> argparse.Namespace:
                         help='Number of prompts to send per vLLM generate call.')
     parser.add_argument('--use_sft_prompt_template', action='store_true',
                         help='Use chat-style SFT prompt template requiring tokenizer.apply_chat_template.')
+    parser.add_argument('--enforce_eager', nargs='?', default=None, type=_str_to_bool,
+                        const=True,
+                        help='Optionally force vLLM to execute in eager mode. '
+                             'Provide an explicit boolean value to override.')
     return parser.parse_args()
 
 
@@ -177,15 +194,19 @@ def main() -> None:
     )
     args.dtype = resolved_dtype
 
-    llm = LLM(
-        model=args.model,
-        tokenizer=args.tokenizer or args.model,
-        tensor_parallel_size=args.tensor_parallel_size,
-        trust_remote_code=args.trust_remote_code,
-        dtype=args.dtype,
-        max_model_len=args.max_model_len,
-        download_dir=args.download_dir,
-    )
+    llm_kwargs: Dict[str, Any] = {
+        'model': args.model,
+        'tokenizer': args.tokenizer or args.model,
+        'tensor_parallel_size': args.tensor_parallel_size,
+        'trust_remote_code': args.trust_remote_code,
+        'dtype': args.dtype,
+        'max_model_len': args.max_model_len,
+        'download_dir': args.download_dir,
+    }
+    if args.enforce_eager is not None:
+        llm_kwargs['enforce_eager'] = args.enforce_eager
+
+    llm = LLM(**llm_kwargs)
     tokenizer = llm.get_tokenizer()
     if tokenizer and tokenizer.pad_token_id is None and tokenizer.eos_token_id is not None:
         tokenizer.pad_token = tokenizer.eos_token
