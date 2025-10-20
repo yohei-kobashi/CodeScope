@@ -16,7 +16,7 @@ def parse_arguments() -> argparse.Namespace:
                         help='Optional tokenizer identifier. Defaults to the model id.')
     parser.add_argument('--tensor_parallel_size', default=1, type=int,
                         help='Tensor parallelism for vLLM.')
-    parser.add_argument('--max_model_len', default=None, type=int,
+    parser.add_argument('--max_model_len', default=8192, type=int,
                         help='Override maximum sequence length handled by vLLM.')
     parser.add_argument('--dtype', default=None, type=str,
                         help='Model weights dtype for vLLM (e.g., float16, bfloat16).')
@@ -26,13 +26,13 @@ def parse_arguments() -> argparse.Namespace:
                         help='Allow execution of remote code during model loading.')
     parser.add_argument('--data_load_name', default='code_translation_data.jsonl', type=str)
     parser.add_argument('--result_save_name', default='code_translation_eval_vllm.jsonl', type=str)
-    parser.add_argument('--log_file_name', default='code_translation_eval_vllm.logs', type=str)
+    parser.add_argument('--log_file_name', default='code_translation_eval_vllm.log', type=str)
     parser.add_argument('--temperature', default=0.5, type=float)
     parser.add_argument('--top_p', default=0.95, type=float)
     parser.add_argument('--top_k', default=50, type=int)
     parser.add_argument('--candidate_num', default=1, type=int)
     parser.add_argument('--max_new_tokens', default=2048, type=int)
-    parser.add_argument('--batch_size', default=8, type=int,
+    parser.add_argument('--batch_size', default=32, type=int,
                         help='Number of prompts to send per vLLM generate call.')
     parser.add_argument('--use_sft_prompt_template', action='store_true',
                         help='Use chat-style SFT prompt template requiring tokenizer.apply_chat_template.')
