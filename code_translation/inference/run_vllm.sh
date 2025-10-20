@@ -20,7 +20,7 @@ export TRITON_CXX="$CXX"
 export CUDAHOSTCXX="$CXX"
 
 export PYTHONNOUSERSITE=1
-cd 
+cd CodeScope/code_translation/inference
 # Qwen3-Coder 30B base model
 python run_vllm.py --model Qwen/Qwen3-Coder-30B-A3B-Instruct --result_save_name code_translation_eval_vllm.jsonl --log_file_name code_translation_eval_vllm.log --use_sft_prompt_template
 
