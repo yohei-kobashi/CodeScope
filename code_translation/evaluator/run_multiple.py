@@ -2,9 +2,10 @@
 Usage:
 1. Prepare a Lambda endpoint mapping such as `lang2url.json` and pass it via `--lang_url_config`.
 2. Provide the JSONL file with the code you want to evaluate through `--jsonl_path`, and choose where to write the results with `--output_path`.
-3. If the language cannot be inferred from the file name or each language needs a different URL, override it explicitly with `--language`.
-4. Cold starts can make the first request fail, so this script pings each endpoint via `/healthz` before running the evaluations. Tune the check with `--healthcheck_*` flags if needed.
-5. Example:
+3. Provide generated programs in each JSON record as `code_translation_<index>` (multiple variants per record are supported and are evaluated independently) and set the desired runtime via `target_lang_cluster`.
+4. If `target_lang_cluster` is missing or you need to override for the entire file, use `--language`.
+5. Cold starts can make the first request fail, so this script pings each endpoint via `/healthz` before running the evaluations. Tune the check with `--healthcheck_*` flags if needed.
+6. Example:
    `python CodeScope/code_translation/evaluator/run_multiple.py --jsonl_path data/sample.jsonl --output_path results/executed_result.json --lang_url_config config/lang2url.json`
 """
 
@@ -12,7 +13,9 @@ import argparse
 import json
 import ast
 import time
-from typing import MutableSet
+import math
+from collections import defaultdict
+from typing import MutableSet, Sequence, Tuple, Dict, List
 from pathlib import Path
 from urllib.parse import urljoin
 
@@ -114,6 +117,54 @@ def ensure_language_health_checked(lang: str, prepared_languages: MutableSet[str
     except KeyError as exc:
         print(f"[HealthCheck] Skipping for '{lang}': {exc}")
     prepared_languages.add(normalized)
+
+
+def pass_at_k(total: int, correct: int, k: int) -> float:
+    if total < k or correct == 0:
+        return 0.0
+    if total - correct < k:
+        return 1.0
+    return 1.0 - math.comb(total - correct, k) / math.comb(total, k)
+
+
+def summarize_pass_metrics(group_results: Dict[Tuple[str, str], List[bool]]) -> Dict[str, dict]:
+    summary: Dict[str, dict] = {}
+    for (src_uid, lang), outcomes in group_results.items():
+        total = len(outcomes)
+        correct = sum(1 for result in outcomes if result)
+        metrics = {}
+        if total >= 1:
+            metrics["pass@1"] = pass_at_k(total, correct, 1)
+        if total >= 5:
+            metrics["pass@5"] = pass_at_k(total, correct, 5)
+        if total >= 10:
+            metrics["pass@10"] = pass_at_k(total, correct, 10)
+        if not metrics:
+            continue
+        key = f"{src_uid}_{lang}"
+        summary[key] = {
+            "src_uid": src_uid,
+            "language": lang,
+            "total": total,
+            "correct": correct,
+            **metrics,
+        }
+    return summary
+
+
+def extract_translations(content: dict) -> Sequence[Tuple[str, str]]:
+    translations: List[Tuple[str, str]] = []
+    prefix = "code_translation_"
+    for key, value in content.items():
+        if not key.startswith(prefix):
+            continue
+        suffix = key[len(prefix):]
+        if not suffix.isdigit():
+            continue
+        if isinstance(value, str):
+            translations.append((key, value))
+    translations.sort(key=lambda item: int(item[0].split("_")[-1]))
+    return translations
 
 
 def normalize_for_compare(text: str | None) -> str:
@@ -306,22 +357,24 @@ def exe_testcase(source_code, answer, input_data, lang, output_dict, wrong_case,
 
 
 @func_set_timeout(300)
-def exe_question(content, lang, output_dict):
-    source_code = content["source_code"]
+def exe_question(content, lang, output_dict, source_code: str, translation_label: str):
+    source_code = source_code or ""
 
-    id = None
-    if "id" in content.keys():
-        id = content["id"]
+    id = content.get("id")
     src_uid = str(content["src_uid"])
     difficulty = str(content["difficulty"])
     testcases = ast.literal_eval(content['testcases'])
-    if "code_uid" in content.keys():
+    if "code_uid" in content:
         submission_id = str(content["code_uid"])
-    else:
+    elif "submission_id" in content:
         submission_id = str(content["submission_id"])
+    else:
+        submission_id = src_uid
+    if translation_label:
+        submission_id = f"{submission_id}_{translation_label}"
 
     if source_code == "":
-        print("No source code detected")
+        print(f"No source code detected for {translation_label or 'entry'}")
         output_dict["error"] = record_result(output_dict["error"], src_uid, submission_id, difficulty, id, None, None,
                                              "No Source Code", "No_Source_Code")
         return output_dict, 1
@@ -378,10 +431,24 @@ def exe_main():
     code_sum, correct_sum = 0, 0
     output_dict = {"accepted": {}, "wrong": {}, "error": {}}
     prepared_languages: MutableSet[str] = set()
+    group_results: Dict[Tuple[str, str], List[bool]] = defaultdict(list)
+    per_language_totals: Dict[str, dict] = defaultdict(lambda: {
+        "code_sum": 0,
+        "correct_sum": 0,
+        "wrong_num": 0,
+        "error_num": 0,
+    })
     with open(jsonl_path, 'r', encoding='utf-8') as f:
-        for idx, line in enumerate(f):
+        for line_idx, line in enumerate(f):
             content = json.loads(line)
-            entry_lang = content.get("language", lang_hint)
+            translations = list(extract_translations(content))
+            if not translations and "source_code" in content:
+                translations = [("source_code", content["source_code"])]
+            if not translations:
+                print(f"No code translations found in line {line_idx + 1}, skipping")
+                continue
+
+            entry_lang = content.get("target_lang_cluster") or content.get("language") or lang_hint
             ensure_language_health_checked(
                 entry_lang,
                 prepared_languages,
@@ -389,24 +456,57 @@ def exe_main():
                 args.healthcheck_interval,
                 args.healthcheck_timeout,
             )
-            try:
-                output_dict, wrong_case = exe_question(content, entry_lang, output_dict)
-            except func_timeout.exceptions.FunctionTimedOut:
-                print("Time Limit Exceeded")
-                wrong_case = 1
+            for translation_label, source_code in translations:
+                prev_wrong = len(output_dict["wrong"])
+                prev_error = len(output_dict["error"])
+                try:
+                    output_dict, wrong_case = exe_question(
+                        content,
+                        entry_lang,
+                        output_dict,
+                        source_code,
+                        translation_label,
+                    )
+                except func_timeout.exceptions.FunctionTimedOut:
+                    print("Time Limit Exceeded")
+                    wrong_case = 1
 
-            code_sum += 1
-            if wrong_case == 0:
-                correct_sum += 1
+                code_sum += 1
+                lang_totals = per_language_totals[entry_lang]
+                lang_totals["code_sum"] += 1
+                success = wrong_case == 0
+                if success:
+                    correct_sum += 1
+                    lang_totals["correct_sum"] += 1
+                src_uid = str(content["src_uid"])
+                group_results[(src_uid, entry_lang)].append(success)
+                if not success:
+                    new_wrong = len(output_dict["wrong"]) - prev_wrong
+                    new_error = len(output_dict["error"]) - prev_error
+                    if new_wrong > 0:
+                        lang_totals["wrong_num"] += 1
+                    elif new_error > 0:
+                        lang_totals["error_num"] += 1
+                    else:
+                        lang_totals["error_num"] += 1
 
-            print("done: ", idx + 1, " not accepted: ", idx + 1 - correct_sum)
+                print("done: ", code_sum, " not accepted: ", code_sum - correct_sum)
 
     wrong_num = len(output_dict["wrong"].keys())
     error_num = len(output_dict["error"].keys())
     print("code_sum:", code_sum, " correct_sum: ", correct_sum, " wrong_num: ", wrong_num, " error_num: ", error_num,
           " accurancy: ", correct_sum / code_sum)
+    pass_summary = summarize_pass_metrics(group_results)
+    overall_accuracy = correct_sum / code_sum if code_sum else 0
     output_dict["info"] = {"code_sum": code_sum, "correct_sum": correct_sum, "wrong_num": wrong_num, "error_num":
-        error_num, "accurancy": correct_sum / code_sum}
+        error_num, "accurancy": overall_accuracy}
+    per_language_summary = {}
+    for lang, stats in per_language_totals.items():
+        lang_code_sum = stats["code_sum"]
+        lang_accuracy = stats["correct_sum"] / lang_code_sum if lang_code_sum else 0
+        per_language_summary[lang] = {**stats, "accuracy": lang_accuracy}
+    output_dict["info_by_language"] = per_language_summary
+    output_dict["pass_metrics"] = pass_summary
 
     with open(args.output_path, 'w', encoding='utf-8') as f:
         json.dump(output_dict, f)
