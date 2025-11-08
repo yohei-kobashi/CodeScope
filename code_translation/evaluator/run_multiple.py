@@ -14,6 +14,7 @@ import json
 import ast
 import time
 import math
+import re
 from collections import defaultdict
 from typing import MutableSet, Sequence, Tuple, Dict, List
 from pathlib import Path
@@ -173,6 +174,16 @@ def normalize_for_compare(text: str | None) -> str:
     normalized = text.replace("\r\n", "\n").replace("\r", "\n")
     normalized = normalized.replace(" ", "").lower().strip()
     return normalized
+
+
+def strip_code_block_wrappers(source_code: str) -> str:
+    """Remove markdown-style code fences and surrounding text."""
+    if not source_code:
+        return ""
+    stripped = re.sub(r"^.*?```[^\n]*\n", "", source_code, flags=re.DOTALL)
+    stripped = re.sub(r"```\n.*$", "", stripped, flags=re.DOTALL)
+    stripped = stripped.replace("```", "")
+    return stripped.strip()
 
 
 def invoke_lambda_executor(lang_key: str, source_code: str, input_data: str, expected_output: str,
@@ -385,6 +396,7 @@ def exe_question(content, lang, output_dict, source_code: str, translation_label
     source_code = source_code.replace("\\\"", "\"")
     source_code = source_code.replace("\r", "")
     source_code = source_code.replace("\r\n", "\n")
+    source_code = strip_code_block_wrappers(source_code)
 
     wrong_case = 0
     err = 0
