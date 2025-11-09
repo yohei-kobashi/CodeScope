@@ -25,7 +25,7 @@ cd CodeScope/code_translation/inference
 python run_vllm.py --model Qwen/Qwen3-Coder-30B-A3B-Instruct --result_save_name code_translation_eval_Qwen3.jsonl --log_file_name code_translation_eval_Qwen3.log --use_sft_prompt_template --enforce_eager True
 
 # # Seed-Coder-8B base model
-# python run_vllm.py --model ByteDance-Seed/Seed-Coder-8B-Instruct --result_save_name code_translation_eval_Seed-Coder.jsonl --log_file_name code_translation_eval_Seed-Coder.log --use_sft_prompt_template
+python run_vllm.py --model ByteDance-Seed/Seed-Coder-8B-Instruct --result_save_name code_translation_eval_Seed-Coder.jsonl --log_file_name code_translation_eval_Seed-Coder.log --use_sft_prompt_template
 
-# # Qwen2.5-Coder-7B-Instruct base model
-# python run_vllm.py --model Qwen/Qwen2.5-Coder-7B-Instruct --result_save_name code_translation_eval_Qwen2.5.jsonl --log_file_name code_translation_eval_Qwen2.5.log --use_sft_prompt_template
+# Qwen2.5-Coder-7B-Instruct base model
+python run_vllm.py --model Qwen/Qwen2.5-Coder-7B-Instruct --result_save_name code_translation_eval_Qwen2.5.jsonl --log_file_name code_translation_eval_Qwen2.5.log --use_sft_prompt_template
