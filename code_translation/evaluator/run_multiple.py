@@ -253,7 +253,7 @@ def invoke_lambda_executor(lang_key: str, source_code: str, input_data: str, exp
         "input": input_data,
         "output": expected_output,
         "name": f"{submission_id}_{lang_key}",
-        "eval_timeout": 120,
+        "eval_timeout": 800,
     }
 
     debug_info["eval_url"] = eval_url

@@ -119,10 +119,10 @@ def build_prompt(example: Dict[str, Any], tokenizer, use_sft_prompt_template: bo
             {
                 "role": "user",
                 "content": (
-                    "Your task is to carefully translate the following {source_lang} code into {target_lang}.\n"
+                    "Your task is to carefully translate the following {source_lang_key} code into {target_lang_key}.\n"
                     "The translated code MUST preserve exactly the same functionality as the original.\n\n"
                     "```{source_lang}\n{source_code}```"
-                ).format(source_lang=source_lang, target_lang=target_lang, source_code=source_code),
+                ).format(source_lang_key=source_lang_key, target_lang_key=target_lang_key, source_lang=source_lang, source_code=source_code),
             },
         ]
         chat_prefix = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
