@@ -73,12 +73,29 @@ LANGUAGE_NAME_MAP: Dict[str, str] = {
     'perl': 'Perl'
 }
 
+shortcode_to_markdowncode = {
+    'c++': 'cpp',
+    'c#': 'csharp',
+    'java': 'java',
+    'javascript': 'javascript',
+    'c': 'c',
+    'python': 'py',
+    'php': 'php',
+    'ruby': 'ruby',
+    'kotlin': 'kotlin',
+    'rust': 'rust',
+    'go': 'go',
+    'd': 'd',
+    'delphi': 'dpr',
+    'perl': 'perl',
+}
 
 def canonical_language_name(name: str) -> str:
     key = (name or '').strip().lower()
     if not key:
         return ''
-    return LANGUAGE_NAME_MAP.get(key, key.capitalize())
+    # return LANGUAGE_NAME_MAP.get(key, key.capitalize())
+    return shortcode_to_markdowncode.get(key, key.capitalize())
 
 
 def build_prompt(example: Dict[str, Any], tokenizer, use_sft_prompt_template: bool) -> str:
@@ -103,13 +120,13 @@ def build_prompt(example: Dict[str, Any], tokenizer, use_sft_prompt_template: bo
                 "role": "user",
                 "content": (
                     "Your task is to carefully translate the following {source_lang} code into {target_lang}.\n"
-                    "The translated code MUST preserve exactly the same functionality as the original.\n"
-                    "Here is the {source_lang} code:\n{source_code}"
+                    "The translated code MUST preserve exactly the same functionality as the original.\n\n"
+                    "```{source_lang}\n{source_code}```"
                 ).format(source_lang=source_lang, target_lang=target_lang, source_code=source_code),
             },
         ]
         chat_prefix = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-        suffix = target_declaration
+        suffix = "```{target_lang}\n".format(target_lang=target_lang)
         if suffix and not suffix.endswith("\n"):
             suffix += "\n"
         prompt = chat_prefix + suffix

@@ -15,6 +15,9 @@ import ast
 import time
 import math
 import re
+import random
+import threading
+import concurrent.futures
 from collections import defaultdict
 from typing import MutableSet, Sequence, Tuple, Dict, List
 from pathlib import Path
@@ -186,31 +189,95 @@ def strip_code_block_wrappers(source_code: str) -> str:
     return stripped.strip()
 
 
-def invoke_lambda_executor(lang_key: str, source_code: str, input_data: str, expected_output: str,
-                           submission_id: str):
+def preprocess_source_code(raw_code: str | None) -> str:
+    """Normalize source text without destroying literal escape sequences."""
+    if not raw_code:
+        return ""
+
+    code = raw_code
+
+    # Drop any BOM that sneaks into the start of the snippet (common with C#/Java files).
+    if code.startswith("\ufeff"):
+        code = code.lstrip("\ufeff")
+
+    # Some datasets keep newline characters double-escaped (\\n) for the entire blob.
+    # Only decode those placeholders when the text does not already contain real line feeds,
+    # so legitimate escape sequences such as '\n' or '\\n' survive untouched.
+    if "\n" not in code and "\\n" in code:
+        code = code.replace("\\r\\n", "\n")
+        code = code.replace("\\n", "\n")
+
+    code = code.replace("\r\n", "\n").replace("\r", "\n")
+    code = strip_code_block_wrappers(code)
+    return code
+
+
+def iter_jsonl_entries(jsonl_path: str, sample_size: int = 0, seed: int | None = None):
+    """Yield (line_idx, line_text) pairs, optionally limited to a random subset."""
+    if sample_size and sample_size > 0:
+        rng = random.Random(seed)
+        reservoir = []
+        total_lines = 0
+        with open(jsonl_path, 'r', encoding='utf-8') as f:
+            for line_idx, line in enumerate(f):
+                total_lines = line_idx + 1
+                if len(reservoir) < sample_size:
+                    reservoir.append((line_idx, line))
+                    continue
+                swap_idx = rng.randint(0, line_idx)
+                if swap_idx < sample_size:
+                    reservoir[swap_idx] = (line_idx, line)
+        if not reservoir:
+            return
+        reservoir.sort(key=lambda item: item[0])
+        print(f"[RandomSample] Processing {len(reservoir)} randomly selected entries "
+              f"(requested {sample_size}) out of {total_lines} total lines")
+        for item in reservoir:
+            yield item
+        return
+
+    with open(jsonl_path, 'r', encoding='utf-8') as f:
+        for line_idx, line in enumerate(f):
+            yield line_idx, line
+
+
+def invoke_lambda_executor(lang_key: str, source_code: str, input_data: str, expected_output: list,
+                           submission_id: str, verbose: bool = False, debug_info: dict | None = None):
+    if debug_info is None:
+        debug_info = {}
     base_url = resolve_language_url(lang_key)
     eval_url = urljoin(base_url if base_url.endswith("/") else base_url + "/", "evaluate")
-    expected_list = [expected_output] if expected_output is not None else []
     payload = {
         "language": lang_key,
         "source_code": source_code,
         "input": input_data,
-        "output": expected_list,
+        "output": expected_output,
         "name": f"{submission_id}_{lang_key}",
+        "eval_timeout": 120,
     }
 
+    debug_info["eval_url"] = eval_url
+    if verbose:
+        debug_info["payload"] = payload
+
     resp = requests.post(eval_url, json=payload, timeout=getattr(args, "request_timeout", 60))
+    debug_info["response_status"] = resp.status_code
     data = None
     parse_error = None
     try:
         data = resp.json()
     except ValueError:
         parse_error = resp.text
+    if verbose:
+        if data is not None:
+            debug_info["response_body"] = json.dumps(data, indent=2, ensure_ascii=False)
+        else:
+            debug_info["response_body"] = parse_error or "<empty response>"
 
     result_entry = (data.get("results") or [{}])[0] if isinstance(data, dict) else {}
     expected_from_result = result_entry.get("expected_output")
     if not expected_from_result:
-        expected_from_result = expected_list
+        expected_from_result = expected_output
 
     return {
         "http_status": resp.status_code,
@@ -221,7 +288,7 @@ def invoke_lambda_executor(lang_key: str, source_code: str, input_data: str, exp
         "program": result_entry.get("program"),
         "expected_output": expected_from_result,
         "raw_error": parse_error if parse_error and not result_entry else None,
-    }
+    }, debug_info
 
 
 def status_to_errtype(status: str | None) -> str:
@@ -236,7 +303,7 @@ def status_to_errtype(status: str | None) -> str:
         return "RUNTIME_ERROR"
     return upper_status
 
-@func_set_timeout(5)
+@func_set_timeout(15)
 def record_result(output_dict, src_uid, submission_id, difficulty, id, answer, output, outerr, errtype=None):
     output_dict[submission_id] = {}
     output_dict[submission_id]["src_uid"] = src_uid
@@ -256,13 +323,15 @@ def record_result(output_dict, src_uid, submission_id, difficulty, id, answer, o
     return output_dict
 
 
-@func_set_timeout(60)
+@func_set_timeout(180)
 def exe_testcase(source_code, answer, input_data, lang, output_dict, wrong_case, src_uid,
                  submission_id, difficulty, id, ):
     err = 0
     errtype = None
     outerr = None
     output_value = None
+    debug_info: dict = {}
+    verbose_enabled = getattr(args, "verbose", False)
 
     normalized_lang = normalize_language_key(lang)
     if not normalized_lang:
@@ -275,7 +344,15 @@ def exe_testcase(source_code, answer, input_data, lang, output_dict, wrong_case,
         return output_dict, wrong_case, err
 
     try:
-        response = invoke_lambda_executor(normalized_lang, source_code, input_data, answer, submission_id)
+        response, debug_info = invoke_lambda_executor(
+            normalized_lang,
+            source_code,
+            input_data,
+            answer,
+            submission_id,
+            verbose=verbose_enabled,
+            debug_info=debug_info,
+        )
     except KeyError as exc:
         err = 1
         errtype = "UNSUPPORTED_LANGUAGE"
@@ -298,8 +375,13 @@ def exe_testcase(source_code, answer, input_data, lang, output_dict, wrong_case,
         normalized_stdout = normalize_for_compare(output_value)
         normalized_expecteds = [normalize_for_compare(item) for item in expected_outputs if item is not None]
         matched = response.get("matched")
-        if matched is None and normalized_expecteds:
-            matched = any(normalized_stdout == candidate for candidate in normalized_expecteds)
+        normalized_match = bool(normalized_expecteds) and any(
+            normalized_stdout == candidate for candidate in normalized_expecteds
+        )
+        if matched is None:
+            matched = normalized_match
+        elif matched is False and normalized_match:
+            matched = True
 
         if http_status != 200:
             err = 1
@@ -318,6 +400,22 @@ def exe_testcase(source_code, answer, input_data, lang, output_dict, wrong_case,
 
     if err == 0:
         return output_dict, wrong_case, err
+
+    if verbose_enabled:
+        eval_url = debug_info.get("eval_url")
+        if eval_url:
+            print(f"[Verbose] POST {eval_url}")
+        payload = debug_info.get("payload")
+        if payload is not None:
+            print("[Verbose] Payload:")
+            print(json.dumps(payload, indent=2, ensure_ascii=False))
+        response_status = debug_info.get("response_status")
+        if response_status is not None:
+            print(f"[Verbose] Response status: {response_status}")
+        response_body = debug_info.get("response_body")
+        if response_body is not None:
+            print("[Verbose] Response body:")
+            print(response_body)
 
     if errtype == "WRONG_ANSWER":
         print("-----------------answer: ", answer, "-------------------")
@@ -367,14 +465,16 @@ def exe_testcase(source_code, answer, input_data, lang, output_dict, wrong_case,
     return output_dict, wrong_case, err
 
 
-@func_set_timeout(300)
+@func_set_timeout(900)
 def exe_question(content, lang, output_dict, source_code: str, translation_label: str):
-    source_code = source_code or ""
+    source_code = preprocess_source_code(source_code)
 
     id = content.get("id")
     src_uid = str(content["src_uid"])
     difficulty = str(content["difficulty"])
-    testcases = ast.literal_eval(content['testcases'])
+    testcases = content["testcases"]
+    if isinstance(content['testcases'], str):
+        testcases = ast.literal_eval(testcases)
     if "code_uid" in content:
         submission_id = str(content["code_uid"])
     elif "submission_id" in content:
@@ -390,25 +490,26 @@ def exe_question(content, lang, output_dict, source_code: str, translation_label
                                              "No Source Code", "No_Source_Code")
         return output_dict, 1
 
-    source_code = source_code.replace("\\\\", "\\")
-    source_code = source_code.replace("\\r", "\r")
-    source_code = source_code.replace("\\n", "\n")
-    source_code = source_code.replace("\\\"", "\"")
-    source_code = source_code.replace("\r", "")
-    source_code = source_code.replace("\r\n", "\n")
-    source_code = strip_code_block_wrappers(source_code)
-
     wrong_case = 0
     err = 0
     for testcase in testcases:
-        input = testcase["input"][0]
-        answer = testcase["output"][0]
+        raw_input = testcase.get("input", "")
+        raw_output = testcase.get("output", "")
 
-        input = input.replace("\r", "")
-        input = input.replace("\r\n", "\n")
+        if isinstance(raw_input, list):
+            input_data = "\n".join(str(item) for item in raw_input)
+        else:
+            input_data = str(raw_input)
+
+        if isinstance(raw_output, list):
+            answer = raw_output
+        else:
+            answer = [str(raw_output)]
+
+        input_data = input_data.replace("\r\n", "\n").replace("\r", "")
 
         try:
-            output_dict, wrong_case, err = exe_testcase(source_code, answer, input, lang,
+            output_dict, wrong_case, err = exe_testcase(source_code, answer, input_data, lang,
                                                         output_dict, wrong_case,
                                                         src_uid, submission_id, difficulty, id)
         except func_timeout.exceptions.FunctionTimedOut:
@@ -450,64 +551,142 @@ def exe_main():
         "wrong_num": 0,
         "error_num": 0,
     })
-    with open(jsonl_path, 'r', encoding='utf-8') as f:
-        for line_idx, line in enumerate(f):
-            content = json.loads(line)
-            translations = list(extract_translations(content))
-            if not translations and "source_code" in content:
-                translations = [("source_code", content["source_code"])]
-            if not translations:
-                print(f"No code translations found in line {line_idx + 1}, skipping")
-                continue
+    prepared_lock = threading.Lock()
 
-            entry_lang = content.get("target_lang_cluster") or content.get("language") or lang_hint
-            ensure_language_health_checked(
-                entry_lang,
-                prepared_languages,
+    def ensure_language_prepared(lang: str):
+        normalized = normalize_language_key(lang)
+        if not normalized:
+            return
+        with prepared_lock:
+            if normalized in prepared_languages:
+                return
+            prepared_languages.add(normalized)
+        try:
+            check_language_server_health(
+                normalized,
                 args.healthcheck_attempts,
                 args.healthcheck_interval,
                 args.healthcheck_timeout,
             )
-            for translation_label, source_code in translations:
-                prev_wrong = len(output_dict["wrong"])
-                prev_error = len(output_dict["error"])
-                try:
-                    output_dict, wrong_case = exe_question(
-                        content,
-                        entry_lang,
-                        output_dict,
-                        source_code,
-                        translation_label,
-                    )
-                except func_timeout.exceptions.FunctionTimedOut:
-                    print("Time Limit Exceeded")
-                    wrong_case = 1
+        except KeyError as exc:
+            print(f"[HealthCheck] Skipping for '{lang}': {exc}")
 
-                code_sum += 1
-                lang_totals = per_language_totals[entry_lang]
-                lang_totals["code_sum"] += 1
-                success = wrong_case == 0
-                if success:
-                    correct_sum += 1
-                    lang_totals["correct_sum"] += 1
-                src_uid = str(content["src_uid"])
-                group_results[(src_uid, entry_lang)].append(success)
-                if not success:
-                    new_wrong = len(output_dict["wrong"]) - prev_wrong
-                    new_error = len(output_dict["error"]) - prev_error
-                    if new_wrong > 0:
-                        lang_totals["wrong_num"] += 1
-                    elif new_error > 0:
-                        lang_totals["error_num"] += 1
-                    else:
-                        lang_totals["error_num"] += 1
+    def process_line(line_idx: int, line: str):
+        local_output = {"accepted": {}, "wrong": {}, "error": {}}
+        local_group_results: Dict[Tuple[str, str], List[bool]] = defaultdict(list)
+        local_per_language_totals: Dict[str, dict] = defaultdict(lambda: {
+            "code_sum": 0,
+            "correct_sum": 0,
+            "wrong_num": 0,
+            "error_num": 0,
+        })
+        local_code_sum = 0
+        local_correct_sum = 0
 
-                print("done: ", code_sum, " not accepted: ", code_sum - correct_sum)
+        content = json.loads(line)
+        translations = list(extract_translations(content))
+        if not translations and "source_code" in content:
+            translations = [("source_code", content["source_code"])]
+        if not translations:
+            print(f"No code translations found in line {line_idx + 1}, skipping")
+            return {
+                "code_sum": 0,
+                "correct_sum": 0,
+                "output": local_output,
+                "group_results": local_group_results,
+                "per_language_totals": local_per_language_totals,
+            }
+
+        entry_lang = content.get("target_lang_cluster") or content.get("language") or lang_hint
+        ensure_language_prepared(entry_lang)
+        src_uid = str(content["src_uid"])
+
+        for translation_label, source_code in translations:
+            prev_wrong = len(local_output["wrong"])
+            prev_error = len(local_output["error"])
+            try:
+                local_output, wrong_case = exe_question(
+                    content,
+                    entry_lang,
+                    local_output,
+                    source_code,
+                    translation_label,
+                )
+            except func_timeout.exceptions.FunctionTimedOut:
+                print("Time Limit Exceeded")
+                wrong_case = 1
+
+            local_code_sum += 1
+            lang_totals = local_per_language_totals[entry_lang]
+            lang_totals["code_sum"] += 1
+            success = wrong_case == 0
+            if success:
+                local_correct_sum += 1
+                lang_totals["correct_sum"] += 1
+            local_group_results[(src_uid, entry_lang)].append(success)
+            if not success:
+                new_wrong = len(local_output["wrong"]) - prev_wrong
+                new_error = len(local_output["error"]) - prev_error
+                if new_wrong > 0:
+                    lang_totals["wrong_num"] += 1
+                elif new_error > 0:
+                    lang_totals["error_num"] += 1
+                else:
+                    lang_totals["error_num"] += 1
+
+        return {
+            "code_sum": local_code_sum,
+            "correct_sum": local_correct_sum,
+            "output": local_output,
+            "group_results": local_group_results,
+            "per_language_totals": local_per_language_totals,
+        }
+
+    processed_any = False
+    futures = []
+    total_entries = 0
+    processed_entries = 0
+    with concurrent.futures.ThreadPoolExecutor(max_workers=args.max_workers) as executor:
+        for line_idx, line in iter_jsonl_entries(jsonl_path, args.random_sample_size, args.random_sample_seed):
+            processed_any = True
+            futures.append(executor.submit(process_line, line_idx, line))
+
+        total_entries = len(futures)
+        for future in concurrent.futures.as_completed(futures):
+            result = future.result()
+            code_sum += result["code_sum"]
+            correct_sum += result["correct_sum"]
+            processed_entries += 1
+
+            for key in ("accepted", "wrong", "error"):
+                output_dict[key].update(result["output"][key])
+
+            for (src_uid, lang), outcomes in result["group_results"].items():
+                group_results[(src_uid, lang)].extend(outcomes)
+
+            for lang, stats in result["per_language_totals"].items():
+                lang_totals = per_language_totals[lang]
+                lang_totals["code_sum"] += stats["code_sum"]
+                lang_totals["correct_sum"] += stats["correct_sum"]
+                lang_totals["wrong_num"] += stats["wrong_num"]
+                lang_totals["error_num"] += stats["error_num"]
+
+            print(f"[Progress] entries {processed_entries}/{total_entries} "
+                  f"| done: {code_sum} not accepted: {code_sum - correct_sum}")
+
+    if not processed_any:
+        print(f"No entries found in {jsonl_path}")
+        return
 
     wrong_num = len(output_dict["wrong"].keys())
     error_num = len(output_dict["error"].keys())
     print("code_sum:", code_sum, " correct_sum: ", correct_sum, " wrong_num: ", wrong_num, " error_num: ", error_num,
           " accurancy: ", correct_sum / code_sum)
+    for lang, stats in per_language_totals.items():
+        lang_code_sum = stats["code_sum"]
+        lang_accuracy = stats["correct_sum"] / lang_code_sum if lang_code_sum else 0
+        print(f"[ByLanguage] {lang} -> code_sum: {lang_code_sum} correct_sum: {stats['correct_sum']} "
+              f"wrong_num: {stats['wrong_num']} error_num: {stats['error_num']} accuracy: {lang_accuracy}")
     pass_summary = summarize_pass_metrics(group_results)
     overall_accuracy = correct_sum / code_sum if code_sum else 0
     output_dict["info"] = {"code_sum": code_sum, "correct_sum": correct_sum, "wrong_num": wrong_num, "error_num":
@@ -528,16 +707,24 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--jsonl_path', type=str, default="program_synthesis_eval_palm_d.jsonl")
     parser.add_argument('--output_path', type=str, default="./results/executed_result.json")
-    parser.add_argument('--lang_url_config', type=str, default="lang2url.json")
+    parser.add_argument('--lang_url_config', type=str, default="evaluator/lang2url.json")
+    parser.add_argument('--random_sample_size', type=int, default=0,
+                        help="If >0, randomly select this many entries from --jsonl_path (e.g., 10) for a quick test run")
+    parser.add_argument('--random_sample_seed', type=int, default=None,
+                        help="Optional seed to make the random subset deterministic")
     parser.add_argument('--language', type=str, default=None,
                         help="Override language hint instead of inferring from file name")
-    parser.add_argument('--request_timeout', type=float, default=60.0)
+    parser.add_argument('--request_timeout', type=float, default=180.0)
     parser.add_argument('--healthcheck_attempts', type=int, default=5,
                         help="Number of attempts when probing Lambda /healthz endpoints")
     parser.add_argument('--healthcheck_interval', type=float, default=10.0,
                         help="Seconds to wait between health check attempts")
-    parser.add_argument('--healthcheck_timeout', type=float, default=5.0,
+    parser.add_argument('--healthcheck_timeout', type=float, default=30.0,
                         help="Per-request timeout (seconds) for health checks")
+    parser.add_argument('--verbose', action='store_true',
+                        help="Print request payloads and API responses for Lambda invocations")
+    parser.add_argument('--max_workers', type=int, default=32,
+                        help="Maximum number of entries to process in parallel")
 
     args = parser.parse_args()
 
