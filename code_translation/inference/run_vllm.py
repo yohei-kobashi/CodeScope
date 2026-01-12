@@ -197,7 +197,7 @@ def batched(iterable: Sequence[Any], batch_size: int) -> Iterable[Sequence[Any]]
 
 def main() -> None:
     load_path = Path(__file__).parent.parent.parent / Path('data') / Path(args.data_load_name)
-    save_path = Path(__file__).parent / Path('result') / Path(args.result_save_name)
+    save_path = Path(__file__).parent.parent / Path('result') / Path(args.result_save_name)
 
     dataset = load_dataset('json', split='train', data_files=str(load_path))
     dataset.cleanup_cache_files()
@@ -281,7 +281,7 @@ if __name__ == '__main__':
     warnings.filterwarnings('ignore')
     args = parse_arguments()
 
-    log_file_path = Path(__file__).parent / Path('log') / Path(args.log_file_name)
+    log_file_path = Path(__file__).parent.parent / Path('log') / Path(args.log_file_name)
     log_file_path.parent.mkdir(parents=True, exist_ok=True)
     logger = logging.getLogger()
     logger.setLevel(logging.INFO)

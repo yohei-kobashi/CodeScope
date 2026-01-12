@@ -21,6 +21,8 @@
         "rkt": "https://74z7jf34y4huzggzrsp3iwz77y0wmzao.lambda-url.ap-northeast-1.on.aws/",
         "pl": "https://axmdnn5try54i6qook5hyf3y7e0qseor.lambda-url.ap-northeast-1.on.aws/",
         "python": "https://6onkqaeyox367zryq2zkd5age40hqgfq.lambda-url.ap-northeast-1.on.aws/",
+        "python2": "https://6tysl6blf7ivb7hmr3yip2hgra0kerxi.lambda-url.ap-northeast-1.on.aws/",
+        "python3": "https://ngbdgk2ewzjvv22q6rksndus3a0yahvx.lambda-url.ap-northeast-1.on.aws/",
         "ocaml": "https://ehvfz4ifmzh3i5fuz2ljt3agnm0utwqp.lambda-url.ap-northeast-1.on.aws/",
         "ml": "https://ehvfz4ifmzh3i5fuz2ljt3agnm0utwqp.lambda-url.ap-northeast-1.on.aws/",
         "dlang": "https://e4rx7dem3yztmtx2cn3hj4qpwa0rssju.lambda-url.ap-northeast-1.on.aws/",

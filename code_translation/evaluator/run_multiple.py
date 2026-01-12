@@ -25,7 +25,7 @@ from urllib.parse import urljoin
 
 import func_timeout
 import requests
-from func_timeout import func_set_timeout
+# from func_timeout import func_set_timeout
 
 LANGUAGE_KEY_MAP = {
     "d": "d",
@@ -247,6 +247,17 @@ def invoke_lambda_executor(lang_key: str, source_code: str, input_data: str, exp
         debug_info = {}
     base_url = resolve_language_url(lang_key)
     eval_url = urljoin(base_url if base_url.endswith("/") else base_url + "/", "evaluate")
+    max_attempts = max(1, getattr(args, "request_retries", 0) + 1)
+    base_retry_delay = max(0.0, getattr(args, "request_retry_delay", 1.0))
+    max_retry_delay = max(base_retry_delay, getattr(args, "request_retry_max_delay", base_retry_delay))
+    retry_statuses = {429, 502, 503, 504}
+    request_timeout = float(getattr(args, "request_timeout", 60))
+    connect_timeout = getattr(args, "request_connect_timeout", None)
+    read_timeout = getattr(args, "request_read_timeout", None)
+    if connect_timeout is None:
+        connect_timeout = min(10.0, request_timeout)
+    if read_timeout is None:
+        read_timeout = request_timeout
     payload = {
         "language": lang_key,
         "source_code": source_code,
@@ -260,7 +271,48 @@ def invoke_lambda_executor(lang_key: str, source_code: str, input_data: str, exp
     if verbose:
         debug_info["payload"] = payload
 
-    resp = requests.post(eval_url, json=payload, timeout=getattr(args, "request_timeout", 60))
+    resp = None
+    last_exc: Exception | None = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            resp = requests.post(eval_url, json=payload, timeout=(connect_timeout, read_timeout))
+            debug_info.setdefault("attempts", []).append(
+                {"attempt": attempt, "response_status": resp.status_code}
+            )
+            should_retry = resp.status_code >= 500 or resp.status_code in retry_statuses
+            if should_retry and attempt < max_attempts:
+                retry_after = 0.0
+                if resp.status_code == 429:
+                    retry_after_header = resp.headers.get("Retry-After")
+                    if retry_after_header:
+                        try:
+                            retry_after = float(retry_after_header)
+                        except ValueError:
+                            retry_after = 0.0
+                backoff = min(max_retry_delay, base_retry_delay * (2 ** (attempt - 1)))
+                jitter = random.uniform(0.0, min(1.0, backoff))
+                delay = max(backoff + jitter, retry_after)
+                print(f"[Retry] HTTP {resp.status_code} from {eval_url} (attempt {attempt}/{max_attempts}); "
+                      f"retrying in {delay:.2f}s")
+                time.sleep(delay)
+                continue
+            break
+        except requests.RequestException as exc:
+            last_exc = exc
+            debug_info.setdefault("attempts", []).append({"attempt": attempt, "error": str(exc)})
+            if attempt >= max_attempts:
+                raise
+            backoff = min(max_retry_delay, base_retry_delay * (2 ** (attempt - 1)))
+            jitter = random.uniform(0.0, min(1.0, backoff))
+            delay = backoff + jitter
+            print(f"[Retry] Request failed ({exc}) (attempt {attempt}/{max_attempts}); "
+                  f"retrying in {delay:.2f}s")
+            time.sleep(delay)
+
+    if resp is None:
+        # Should only happen if the retry loop never ran; keep a clear error for safety.
+        raise RuntimeError(f"Failed to invoke evaluator at {eval_url}: {last_exc or 'Unknown error'}")
+
     debug_info["response_status"] = resp.status_code
     data = None
     parse_error = None
@@ -303,7 +355,6 @@ def status_to_errtype(status: str | None) -> str:
         return "RUNTIME_ERROR"
     return upper_status
 
-@func_set_timeout(15)
 def record_result(output_dict, src_uid, submission_id, difficulty, id, answer, output, outerr, errtype=None):
     output_dict[submission_id] = {}
     output_dict[submission_id]["src_uid"] = src_uid
@@ -323,13 +374,13 @@ def record_result(output_dict, src_uid, submission_id, difficulty, id, answer, o
     return output_dict
 
 
-@func_set_timeout(180)
 def exe_testcase(source_code, answer, input_data, lang, output_dict, wrong_case, src_uid,
                  submission_id, difficulty, id, ):
     err = 0
     errtype = None
     outerr = None
     output_value = None
+    invalid_case = 0
     debug_info: dict = {}
     verbose_enabled = getattr(args, "verbose", False)
 
@@ -343,63 +394,137 @@ def exe_testcase(source_code, answer, input_data, lang, output_dict, wrong_case,
         wrong_case += 1
         return output_dict, wrong_case, err
 
-    try:
-        response, debug_info = invoke_lambda_executor(
-            normalized_lang,
-            source_code,
-            input_data,
-            answer,
-            submission_id,
-            verbose=verbose_enabled,
-            debug_info=debug_info,
-        )
-    except KeyError as exc:
-        err = 1
-        errtype = "UNSUPPORTED_LANGUAGE"
-        outerr = str(exc)
-    except requests.RequestException as exc:
-        err = 1
-        errtype = "NETWORK_ERROR"
-        outerr = str(exc)
-    except Exception as exc:
-        err = 1
-        errtype = "RUNTIME_ERROR"
-        outerr = str(exc)
-    else:
-        http_status = response.get("http_status")
-        status = response.get("status")
-        output_value = response.get("stdout") or ""
-        stderr_value = response.get("stderr") or response.get("raw_error")
-        expected_outputs = response.get("expected_output") or ([answer] if answer else [])
+    def evaluate_with_lang(lang_key: str):
+        local_debug: dict = {}
+        local_err = 0
+        local_errtype = None
+        local_outerr = None
+        local_output_value = None
+        lambda_error = False
 
-        normalized_stdout = normalize_for_compare(output_value)
-        normalized_expecteds = [normalize_for_compare(item) for item in expected_outputs if item is not None]
-        matched = response.get("matched")
-        normalized_match = bool(normalized_expecteds) and any(
-            normalized_stdout == candidate for candidate in normalized_expecteds
-        )
-        if matched is None:
-            matched = normalized_match
-        elif matched is False and normalized_match:
-            matched = True
-
-        if http_status != 200:
-            err = 1
-            errtype = status_to_errtype(status or "HTTP_ERROR")
-            outerr = f"HTTP {http_status}: {stderr_value or 'No response body'}"
-        elif status is not None and status.upper() != "OK":
-            err = 1
-            errtype = status_to_errtype(status)
-            outerr = stderr_value
-        elif matched is False:
-            err = 1
-            errtype = "WRONG_ANSWER"
-            outerr = stderr_value
+        try:
+            response, local_debug = invoke_lambda_executor(
+                lang_key,
+                source_code,
+                input_data,
+                answer,
+                submission_id,
+                verbose=verbose_enabled,
+                debug_info=local_debug,
+            )
+        except KeyError as exc:
+            local_err = 1
+            local_errtype = "UNSUPPORTED_LANGUAGE"
+            local_outerr = str(exc)
+        except requests.RequestException as exc:
+            local_err = 1
+            local_errtype = "LAMBDA_ERROR"
+            local_outerr = str(exc)
+            lambda_error = True
+        except Exception as exc:
+            local_err = 1
+            local_errtype = "RUNTIME_ERROR"
+            local_outerr = str(exc)
         else:
-            err = 0
+            http_status = response.get("http_status")
+            status = response.get("status")
+            local_output_value = response.get("stdout") or ""
+            stderr_value = response.get("stderr") or response.get("raw_error")
+            expected_outputs = response.get("expected_output") or ([answer] if answer else [])
+            raw_error = response.get("raw_error")
+
+            normalized_stdout = normalize_for_compare(local_output_value)
+            normalized_expecteds = [normalize_for_compare(item) for item in expected_outputs if item is not None]
+            matched = response.get("matched")
+            normalized_match = bool(normalized_expecteds) and any(
+                normalized_stdout == candidate for candidate in normalized_expecteds
+            )
+            if matched is None:
+                matched = normalized_match
+            elif matched is False and normalized_match:
+                matched = True
+
+            if raw_error:
+                local_err = 1
+                local_errtype = "LAMBDA_ERROR"
+                local_outerr = f"Malformed response: {raw_error}"
+                lambda_error = True
+            elif http_status != 200:
+                local_err = 1
+                if http_status >= 500 or http_status in {429, 502, 503, 504}:
+                    local_errtype = "LAMBDA_ERROR"
+                    lambda_error = True
+                else:
+                    local_errtype = status_to_errtype(status or "HTTP_ERROR")
+                local_outerr = f"HTTP {http_status}: {stderr_value or 'No response body'}"
+            elif status is not None and status.upper() != "OK":
+                local_err = 1
+                local_errtype = status_to_errtype(status)
+                local_outerr = stderr_value
+            elif matched is False:
+                local_err = 1
+                local_errtype = "WRONG_ANSWER"
+                local_outerr = stderr_value
+
+        if local_err != 0 and local_outerr is None:
+            local_outerr = "Unknown error"
+
+        return {
+            "err": local_err,
+            "errtype": local_errtype,
+            "outerr": local_outerr,
+            "output_value": local_output_value,
+            "debug_info": local_debug,
+            "lambda_error": lambda_error,
+        }
+
+    result = None
+
+    if normalized_lang == "python":
+        # Prefer python2 executor, fall back to python3 if it fails or mismatches.
+        python_attempts: list[dict] = []
+        py2_result = evaluate_with_lang("python2")
+        python_attempts.append({"lang": "python2", "debug": py2_result.get("debug_info")})
+
+        if py2_result["err"] == 0:
+            result = py2_result
+        else:
+            py3_result = evaluate_with_lang("python3")
+            python_attempts.append({"lang": "python3", "debug": py3_result.get("debug_info")})
+            if py3_result["err"] == 0:
+                result = py3_result
+            else:
+                combined_error_parts = []
+                if py2_result.get("outerr"):
+                    combined_error_parts.append(f"python2: {py2_result['outerr']}")
+                if py3_result.get("outerr"):
+                    combined_error_parts.append(f"python3: {py3_result['outerr']}")
+                combined_outerr = " | ".join(combined_error_parts) or "python2/python3 evaluation failed"
+                result = {
+                    "err": 1,
+                    "errtype": py3_result.get("errtype") or py2_result.get("errtype"),
+                    "outerr": combined_outerr,
+                    "output_value": py3_result.get("output_value") or py2_result.get("output_value"),
+                    "debug_info": py3_result.get("debug_info"),
+                }
+
+        if result is None:
+            result = py2_result
+
+        debug_info = result.get("debug_info") if isinstance(result.get("debug_info"), dict) else {}
+        debug_info.setdefault("python_attempts", python_attempts)
+        result["debug_info"] = debug_info
+    else:
+        result = evaluate_with_lang(normalized_lang)
+
+    err = result.get("err", 1)
+    errtype = result.get("errtype")
+    outerr = result.get("outerr")
+    output_value = result.get("output_value")
+    debug_info = result.get("debug_info") if isinstance(result.get("debug_info"), dict) else result.get("debug_info")
 
     if err == 0:
-        return output_dict, wrong_case, err
+        return output_dict, wrong_case, err, invalid_case
 
     if verbose_enabled:
         eval_url = debug_info.get("eval_url")
@@ -417,7 +542,20 @@ def exe_testcase(source_code, answer, input_data, lang, output_dict, wrong_case,
             print("[Verbose] Response body:")
             print(response_body)
 
-    if errtype == "WRONG_ANSWER":
+    if errtype == "LAMBDA_ERROR":
+        invalid_case = 1
+        output_dict["invalid"] = record_result(
+            output_dict["invalid"],
+            src_uid,
+            submission_id,
+            difficulty,
+            id,
+            None,
+            None,
+            outerr,
+            errtype,
+        )
+    elif errtype == "WRONG_ANSWER":
         print("-----------------answer: ", answer, "-------------------")
         print("-----------------output: ", output_value, "-------------------")
         print("WRONG_ANSWER in src_uid: ", src_uid)
@@ -462,10 +600,9 @@ def exe_testcase(source_code, answer, input_data, lang, output_dict, wrong_case,
         )
 
     wrong_case += 1
-    return output_dict, wrong_case, err
+    return output_dict, wrong_case, err, invalid_case
 
 
-@func_set_timeout(900)
 def exe_question(content, lang, output_dict, source_code: str, translation_label: str):
     source_code = preprocess_source_code(source_code)
 
@@ -508,15 +645,28 @@ def exe_question(content, lang, output_dict, source_code: str, translation_label
 
         input_data = input_data.replace("\r\n", "\n").replace("\r", "")
 
+        invalid_case = 0
         try:
-            output_dict, wrong_case, err = exe_testcase(source_code, answer, input_data, lang,
-                                                        output_dict, wrong_case,
-                                                        src_uid, submission_id, difficulty, id)
+            output_dict, wrong_case, err, invalid_case = exe_testcase(
+                source_code,
+                answer,
+                input_data,
+                lang,
+                output_dict,
+                wrong_case,
+                src_uid,
+                submission_id,
+                difficulty,
+                id,
+            )
         except func_timeout.exceptions.FunctionTimedOut:
             err, wrong_case = 1, 1
             print("Time Limit Exceeded")
             output_dict["error"] = record_result(output_dict["error"], src_uid, submission_id, difficulty, id, None,
                                                  None, "Time Limit Exceeded", "RUNTIME_ERROR")
+
+        if invalid_case:
+            return output_dict, 1, 1
 
         if err == 1:
             wrong_case = 1
@@ -525,7 +675,7 @@ def exe_question(content, lang, output_dict, source_code: str, translation_label
         output_dict["accepted"] = record_result(output_dict["accepted"], src_uid, submission_id, difficulty, id, None,
                                                 None, None, None)
 
-    return output_dict, wrong_case
+    return output_dict, wrong_case, 0
 
 
 def exe_main():
@@ -542,7 +692,7 @@ def exe_main():
         lang_hint = jsonl_path.split(".")[0].split("_")[-1]
 
     code_sum, correct_sum = 0, 0
-    output_dict = {"accepted": {}, "wrong": {}, "error": {}}
+    output_dict = {"accepted": {}, "wrong": {}, "error": {}, "invalid": {}}
     prepared_languages: MutableSet[str] = set()
     group_results: Dict[Tuple[str, str], List[bool]] = defaultdict(list)
     per_language_totals: Dict[str, dict] = defaultdict(lambda: {
@@ -550,6 +700,7 @@ def exe_main():
         "correct_sum": 0,
         "wrong_num": 0,
         "error_num": 0,
+        "invalid_num": 0,
     })
     prepared_lock = threading.Lock()
 
@@ -572,16 +723,18 @@ def exe_main():
             print(f"[HealthCheck] Skipping for '{lang}': {exc}")
 
     def process_line(line_idx: int, line: str):
-        local_output = {"accepted": {}, "wrong": {}, "error": {}}
+        local_output = {"accepted": {}, "wrong": {}, "error": {}, "invalid": {}}
         local_group_results: Dict[Tuple[str, str], List[bool]] = defaultdict(list)
         local_per_language_totals: Dict[str, dict] = defaultdict(lambda: {
             "code_sum": 0,
             "correct_sum": 0,
             "wrong_num": 0,
             "error_num": 0,
+            "invalid_num": 0,
         })
         local_code_sum = 0
         local_correct_sum = 0
+        local_invalid_sum = 0
 
         content = json.loads(line)
         translations = list(extract_translations(content))
@@ -605,7 +758,7 @@ def exe_main():
             prev_wrong = len(local_output["wrong"])
             prev_error = len(local_output["error"])
             try:
-                local_output, wrong_case = exe_question(
+                local_output, wrong_case, invalid_case = exe_question(
                     content,
                     entry_lang,
                     local_output,
@@ -615,28 +768,34 @@ def exe_main():
             except func_timeout.exceptions.FunctionTimedOut:
                 print("Time Limit Exceeded")
                 wrong_case = 1
+                invalid_case = 0
 
-            local_code_sum += 1
             lang_totals = local_per_language_totals[entry_lang]
-            lang_totals["code_sum"] += 1
-            success = wrong_case == 0
-            if success:
-                local_correct_sum += 1
-                lang_totals["correct_sum"] += 1
-            local_group_results[(src_uid, entry_lang)].append(success)
-            if not success:
-                new_wrong = len(local_output["wrong"]) - prev_wrong
-                new_error = len(local_output["error"]) - prev_error
-                if new_wrong > 0:
-                    lang_totals["wrong_num"] += 1
-                elif new_error > 0:
-                    lang_totals["error_num"] += 1
-                else:
-                    lang_totals["error_num"] += 1
+            if invalid_case:
+                local_invalid_sum += 1
+                lang_totals["invalid_num"] += 1
+            else:
+                local_code_sum += 1
+                lang_totals["code_sum"] += 1
+                success = wrong_case == 0
+                if success:
+                    local_correct_sum += 1
+                    lang_totals["correct_sum"] += 1
+                local_group_results[(src_uid, entry_lang)].append(success)
+                if not success:
+                    new_wrong = len(local_output["wrong"]) - prev_wrong
+                    new_error = len(local_output["error"]) - prev_error
+                    if new_wrong > 0:
+                        lang_totals["wrong_num"] += 1
+                    elif new_error > 0:
+                        lang_totals["error_num"] += 1
+                    else:
+                        lang_totals["error_num"] += 1
 
         return {
             "code_sum": local_code_sum,
             "correct_sum": local_correct_sum,
+            "invalid_sum": local_invalid_sum,
             "output": local_output,
             "group_results": local_group_results,
             "per_language_totals": local_per_language_totals,
@@ -646,6 +805,8 @@ def exe_main():
     futures = []
     total_entries = 0
     processed_entries = 0
+    invalid_sum = 0
+    aborted = False
     with concurrent.futures.ThreadPoolExecutor(max_workers=args.max_workers) as executor:
         for line_idx, line in iter_jsonl_entries(jsonl_path, args.random_sample_size, args.random_sample_seed):
             processed_any = True
@@ -656,9 +817,10 @@ def exe_main():
             result = future.result()
             code_sum += result["code_sum"]
             correct_sum += result["correct_sum"]
+            invalid_sum += result["invalid_sum"]
             processed_entries += 1
 
-            for key in ("accepted", "wrong", "error"):
+            for key in ("accepted", "wrong", "error", "invalid"):
                 output_dict[key].update(result["output"][key])
 
             for (src_uid, lang), outcomes in result["group_results"].items():
@@ -670,9 +832,23 @@ def exe_main():
                 lang_totals["correct_sum"] += stats["correct_sum"]
                 lang_totals["wrong_num"] += stats["wrong_num"]
                 lang_totals["error_num"] += stats["error_num"]
+                lang_totals["invalid_num"] += stats["invalid_num"]
 
             print(f"[Progress] entries {processed_entries}/{total_entries} "
                   f"| done: {code_sum} not accepted: {code_sum - correct_sum}")
+
+            total_attempts = code_sum + invalid_sum
+            max_invalid_rate = getattr(args, "max_lambda_error_rate", None)
+            min_samples = getattr(args, "lambda_error_min_samples", 0)
+            if (max_invalid_rate is not None and max_invalid_rate >= 0
+                    and total_attempts >= min_samples and total_attempts > 0):
+                invalid_rate = invalid_sum / total_attempts
+                if invalid_rate > max_invalid_rate:
+                    print(f"[Abort] Lambda error rate {invalid_rate:.3f} exceeded "
+                          f"threshold {max_invalid_rate:.3f} after {total_attempts} attempts")
+                    aborted = True
+                    executor.shutdown(cancel_futures=True)
+                    break
 
     if not processed_any:
         print(f"No entries found in {jsonl_path}")
@@ -680,17 +856,22 @@ def exe_main():
 
     wrong_num = len(output_dict["wrong"].keys())
     error_num = len(output_dict["error"].keys())
+    invalid_num = len(output_dict["invalid"].keys())
+    overall_accuracy = correct_sum / code_sum if code_sum else 0
     print("code_sum:", code_sum, " correct_sum: ", correct_sum, " wrong_num: ", wrong_num, " error_num: ", error_num,
-          " accurancy: ", correct_sum / code_sum)
+          " accurancy: ", overall_accuracy)
     for lang, stats in per_language_totals.items():
         lang_code_sum = stats["code_sum"]
         lang_accuracy = stats["correct_sum"] / lang_code_sum if lang_code_sum else 0
         print(f"[ByLanguage] {lang} -> code_sum: {lang_code_sum} correct_sum: {stats['correct_sum']} "
-              f"wrong_num: {stats['wrong_num']} error_num: {stats['error_num']} accuracy: {lang_accuracy}")
+              f"wrong_num: {stats['wrong_num']} error_num: {stats['error_num']} "
+              f"invalid_num: {stats['invalid_num']} accuracy: {lang_accuracy}")
     pass_summary = summarize_pass_metrics(group_results)
-    overall_accuracy = correct_sum / code_sum if code_sum else 0
+    total_attempts = code_sum + invalid_sum
+    lambda_error_rate = invalid_sum / total_attempts if total_attempts else 0
     output_dict["info"] = {"code_sum": code_sum, "correct_sum": correct_sum, "wrong_num": wrong_num, "error_num":
-        error_num, "accurancy": overall_accuracy}
+        error_num, "invalid_num": invalid_num, "lambda_error_rate": lambda_error_rate, "aborted": aborted,
+        "accurancy": overall_accuracy}
     per_language_summary = {}
     for lang, stats in per_language_totals.items():
         lang_code_sum = stats["code_sum"]
@@ -701,6 +882,9 @@ def exe_main():
 
     with open(args.output_path, 'w', encoding='utf-8') as f:
         json.dump(output_dict, f)
+
+    if aborted:
+        raise SystemExit(2)
 
 
 if __name__ == '__main__':
@@ -714,13 +898,27 @@ if __name__ == '__main__':
                         help="Optional seed to make the random subset deterministic")
     parser.add_argument('--language', type=str, default=None,
                         help="Override language hint instead of inferring from file name")
-    parser.add_argument('--request_timeout', type=float, default=180.0)
+    parser.add_argument('--request_timeout', type=float, default=900.0)
+    parser.add_argument('--request_retries', type=int, default=3,
+                        help="How many times to retry evaluator requests after failures/timeouts")
+    parser.add_argument('--request_retry_delay', type=float, default=5.0,
+                        help="Seconds to wait before retrying a failed evaluator request")
+    parser.add_argument('--request_retry_max_delay', type=float, default=30.0,
+                        help="Upper bound for exponential backoff delays (seconds)")
+    parser.add_argument('--request_connect_timeout', type=float, default=5.0,
+                        help="Connection timeout (seconds) for evaluator requests")
+    parser.add_argument('--request_read_timeout', type=float, default=None,
+                        help="Read timeout (seconds) for evaluator requests; defaults to --request_timeout")
     parser.add_argument('--healthcheck_attempts', type=int, default=5,
                         help="Number of attempts when probing Lambda /healthz endpoints")
     parser.add_argument('--healthcheck_interval', type=float, default=10.0,
                         help="Seconds to wait between health check attempts")
     parser.add_argument('--healthcheck_timeout', type=float, default=30.0,
                         help="Per-request timeout (seconds) for health checks")
+    parser.add_argument('--max_lambda_error_rate', type=float, default=-1.0,
+                        help="Abort if invalid (Lambda-side) error rate exceeds this value; set <0 to disable")
+    parser.add_argument('--lambda_error_min_samples', type=int, default=20,
+                        help="Minimum attempts before enforcing max_lambda_error_rate")
     parser.add_argument('--verbose', action='store_true',
                         help="Print request payloads and API responses for Lambda invocations")
     parser.add_argument('--max_workers', type=int, default=32,
