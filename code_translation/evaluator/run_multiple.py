@@ -625,7 +625,7 @@ def exe_question(content, lang, output_dict, source_code: str, translation_label
         print(f"No source code detected for {translation_label or 'entry'}")
         output_dict["error"] = record_result(output_dict["error"], src_uid, submission_id, difficulty, id, None, None,
                                              "No Source Code", "No_Source_Code")
-        return output_dict, 1
+        return output_dict, 1, 0
 
     wrong_case = 0
     err = 0
@@ -899,11 +899,11 @@ if __name__ == '__main__':
     parser.add_argument('--language', type=str, default=None,
                         help="Override language hint instead of inferring from file name")
     parser.add_argument('--request_timeout', type=float, default=900.0)
-    parser.add_argument('--request_retries', type=int, default=3,
+    parser.add_argument('--request_retries', type=int, default=5,
                         help="How many times to retry evaluator requests after failures/timeouts")
-    parser.add_argument('--request_retry_delay', type=float, default=5.0,
+    parser.add_argument('--request_retry_delay', type=float, default=30.0,
                         help="Seconds to wait before retrying a failed evaluator request")
-    parser.add_argument('--request_retry_max_delay', type=float, default=30.0,
+    parser.add_argument('--request_retry_max_delay', type=float, default=60.0,
                         help="Upper bound for exponential backoff delays (seconds)")
     parser.add_argument('--request_connect_timeout', type=float, default=5.0,
                         help="Connection timeout (seconds) for evaluator requests")
