@@ -18,6 +18,7 @@ import re
 import random
 import threading
 import concurrent.futures
+from contextlib import ExitStack, contextmanager
 from collections import defaultdict
 from typing import MutableSet, Sequence, Tuple, Dict, List
 from pathlib import Path
@@ -58,6 +59,9 @@ LANGUAGE_KEY_MAP = {
 LANGUAGE_URL_FALLBACKS = {}
 
 LANG_URLS = {}
+TOTAL_INFLIGHT_LIMITER: threading.BoundedSemaphore | None = None
+LANG_INFLIGHT_LIMITERS: dict[str, threading.BoundedSemaphore] = {}
+LANG_LIMITER_LOCK = threading.Lock()
 
 
 def load_lang_urls(path: str):
@@ -89,6 +93,30 @@ def resolve_language_url(lang_key: str) -> str:
             return LANG_URLS[candidate]
 
     raise KeyError(f"No lambda URL configured for language '{lang_key}'")
+
+
+@contextmanager
+def _semaphore_guard(semaphore: threading.BoundedSemaphore | None):
+    if semaphore is None:
+        yield
+        return
+    semaphore.acquire()
+    try:
+        yield
+    finally:
+        semaphore.release()
+
+
+def get_lang_inflight_limiter(lang_key: str) -> threading.BoundedSemaphore | None:
+    max_per_lang = getattr(args, "max_inflight_per_lang", 0)
+    if not max_per_lang or max_per_lang <= 0:
+        return None
+    with LANG_LIMITER_LOCK:
+        limiter = LANG_INFLIGHT_LIMITERS.get(lang_key)
+        if limiter is None:
+            limiter = threading.BoundedSemaphore(max_per_lang)
+            LANG_INFLIGHT_LIMITERS[lang_key] = limiter
+        return limiter
 
 
 def check_language_server_health(lang_key: str, attempts: int = 5, interval: float = 10.0,
@@ -275,7 +303,10 @@ def invoke_lambda_executor(lang_key: str, source_code: str, input_data: str, exp
     last_exc: Exception | None = None
     for attempt in range(1, max_attempts + 1):
         try:
-            resp = requests.post(eval_url, json=payload, timeout=(connect_timeout, read_timeout))
+            with ExitStack() as stack:
+                stack.enter_context(_semaphore_guard(TOTAL_INFLIGHT_LIMITER))
+                stack.enter_context(_semaphore_guard(get_lang_inflight_limiter(lang_key)))
+                resp = requests.post(eval_url, json=payload, timeout=(connect_timeout, read_timeout))
             debug_info.setdefault("attempts", []).append(
                 {"attempt": attempt, "response_status": resp.status_code}
             )
@@ -679,6 +710,7 @@ def exe_question(content, lang, output_dict, source_code: str, translation_label
 
 
 def exe_main():
+    global TOTAL_INFLIGHT_LIMITER
 
     try:
         load_lang_urls(args.lang_url_config)
@@ -686,6 +718,8 @@ def exe_main():
         raise RuntimeError(f"Failed to load language URL config: {exc}") from exc
 
     jsonl_path = args.jsonl_path
+    if getattr(args, "max_inflight_total", 0) and args.max_inflight_total > 0:
+        TOTAL_INFLIGHT_LIMITER = threading.BoundedSemaphore(args.max_inflight_total)
     if args.language:
         lang_hint = args.language
     else:
@@ -696,6 +730,13 @@ def exe_main():
     prepared_languages: MutableSet[str] = set()
     group_results: Dict[Tuple[str, str], List[bool]] = defaultdict(list)
     per_language_totals: Dict[str, dict] = defaultdict(lambda: {
+        "code_sum": 0,
+        "correct_sum": 0,
+        "wrong_num": 0,
+        "error_num": 0,
+        "invalid_num": 0,
+    })
+    per_lang_pair_totals: Dict[Tuple[str, str], dict] = defaultdict(lambda: {
         "code_sum": 0,
         "correct_sum": 0,
         "wrong_num": 0,
@@ -732,6 +773,13 @@ def exe_main():
             "error_num": 0,
             "invalid_num": 0,
         })
+        local_per_lang_pair_totals: Dict[Tuple[str, str], dict] = defaultdict(lambda: {
+            "code_sum": 0,
+            "correct_sum": 0,
+            "wrong_num": 0,
+            "error_num": 0,
+            "invalid_num": 0,
+        })
         local_code_sum = 0
         local_correct_sum = 0
         local_invalid_sum = 0
@@ -751,6 +799,7 @@ def exe_main():
             }
 
         entry_lang = content.get("target_lang_cluster") or content.get("language") or lang_hint
+        source_lang = content.get("source_lang_cluster") or "unknown"
         ensure_language_prepared(entry_lang)
         src_uid = str(content["src_uid"])
 
@@ -771,26 +820,34 @@ def exe_main():
                 invalid_case = 0
 
             lang_totals = local_per_language_totals[entry_lang]
+            pair_key = (source_lang, entry_lang)
+            pair_totals = local_per_lang_pair_totals[pair_key]
             if invalid_case:
                 local_invalid_sum += 1
                 lang_totals["invalid_num"] += 1
+                pair_totals["invalid_num"] += 1
             else:
                 local_code_sum += 1
                 lang_totals["code_sum"] += 1
+                pair_totals["code_sum"] += 1
                 success = wrong_case == 0
                 if success:
                     local_correct_sum += 1
                     lang_totals["correct_sum"] += 1
+                    pair_totals["correct_sum"] += 1
                 local_group_results[(src_uid, entry_lang)].append(success)
                 if not success:
                     new_wrong = len(local_output["wrong"]) - prev_wrong
                     new_error = len(local_output["error"]) - prev_error
                     if new_wrong > 0:
                         lang_totals["wrong_num"] += 1
+                        pair_totals["wrong_num"] += 1
                     elif new_error > 0:
                         lang_totals["error_num"] += 1
+                        pair_totals["error_num"] += 1
                     else:
                         lang_totals["error_num"] += 1
+                        pair_totals["error_num"] += 1
 
         return {
             "code_sum": local_code_sum,
@@ -799,6 +856,7 @@ def exe_main():
             "output": local_output,
             "group_results": local_group_results,
             "per_language_totals": local_per_language_totals,
+            "per_lang_pair_totals": local_per_lang_pair_totals,
         }
 
     processed_any = False
@@ -833,6 +891,13 @@ def exe_main():
                 lang_totals["wrong_num"] += stats["wrong_num"]
                 lang_totals["error_num"] += stats["error_num"]
                 lang_totals["invalid_num"] += stats["invalid_num"]
+            for pair_key, stats in result["per_lang_pair_totals"].items():
+                pair_totals = per_lang_pair_totals[pair_key]
+                pair_totals["code_sum"] += stats["code_sum"]
+                pair_totals["correct_sum"] += stats["correct_sum"]
+                pair_totals["wrong_num"] += stats["wrong_num"]
+                pair_totals["error_num"] += stats["error_num"]
+                pair_totals["invalid_num"] += stats["invalid_num"]
 
             print(f"[Progress] entries {processed_entries}/{total_entries} "
                   f"| done: {code_sum} not accepted: {code_sum - correct_sum}")
@@ -866,6 +931,13 @@ def exe_main():
         print(f"[ByLanguage] {lang} -> code_sum: {lang_code_sum} correct_sum: {stats['correct_sum']} "
               f"wrong_num: {stats['wrong_num']} error_num: {stats['error_num']} "
               f"invalid_num: {stats['invalid_num']} accuracy: {lang_accuracy}")
+    for (src_lang, tgt_lang), stats in per_lang_pair_totals.items():
+        pair_code_sum = stats["code_sum"]
+        pair_accuracy = stats["correct_sum"] / pair_code_sum if pair_code_sum else 0
+        print(f"[ByLangPair] {src_lang}->{tgt_lang} -> code_sum: {pair_code_sum} "
+              f"correct_sum: {stats['correct_sum']} wrong_num: {stats['wrong_num']} "
+              f"error_num: {stats['error_num']} invalid_num: {stats['invalid_num']} "
+              f"accuracy: {pair_accuracy}")
     pass_summary = summarize_pass_metrics(group_results)
     total_attempts = code_sum + invalid_sum
     lambda_error_rate = invalid_sum / total_attempts if total_attempts else 0
@@ -878,6 +950,18 @@ def exe_main():
         lang_accuracy = stats["correct_sum"] / lang_code_sum if lang_code_sum else 0
         per_language_summary[lang] = {**stats, "accuracy": lang_accuracy}
     output_dict["info_by_language"] = per_language_summary
+    per_lang_pair_summary = {}
+    for (src_lang, tgt_lang), stats in per_lang_pair_totals.items():
+        pair_code_sum = stats["code_sum"]
+        pair_accuracy = stats["correct_sum"] / pair_code_sum if pair_code_sum else 0
+        key = f"{src_lang}__{tgt_lang}"
+        per_lang_pair_summary[key] = {
+            "source_lang": src_lang,
+            "target_lang": tgt_lang,
+            **stats,
+            "accuracy": pair_accuracy,
+        }
+    output_dict["info_by_lang_pair"] = per_lang_pair_summary
     output_dict["pass_metrics"] = pass_summary
 
     with open(args.output_path, 'w', encoding='utf-8') as f:
@@ -923,7 +1007,20 @@ if __name__ == '__main__':
                         help="Print request payloads and API responses for Lambda invocations")
     parser.add_argument('--max_workers', type=int, default=32,
                         help="Maximum number of entries to process in parallel")
+    parser.add_argument('--max_inflight_total', type=int, default=None,
+                        help="Limit total in-flight Lambda requests; set <=0 to disable. "
+                             "Defaults to min(--max_workers, 64).")
+    parser.add_argument('--max_inflight_per_lang', type=int, default=None,
+                        help="Limit in-flight Lambda requests per language; set <=0 to disable. "
+                             "Defaults to min(8, --max_inflight_total).")
 
     args = parser.parse_args()
+    if args.max_inflight_total is None:
+        args.max_inflight_total = min(args.max_workers, 64)
+    if args.max_inflight_per_lang is None:
+        if args.max_inflight_total and args.max_inflight_total > 0:
+            args.max_inflight_per_lang = min(8, args.max_inflight_total)
+        else:
+            args.max_inflight_per_lang = 0
 
     exe_main()
