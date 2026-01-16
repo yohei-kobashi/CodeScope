@@ -1007,10 +1007,10 @@ if __name__ == '__main__':
                         help="Print request payloads and API responses for Lambda invocations")
     parser.add_argument('--max_workers', type=int, default=32,
                         help="Maximum number of entries to process in parallel")
-    parser.add_argument('--max_inflight_total', type=int, default=None,
+    parser.add_argument('--max_inflight_total', type=int, default=64,
                         help="Limit total in-flight Lambda requests; set <=0 to disable. "
                              "Defaults to min(--max_workers, 64).")
-    parser.add_argument('--max_inflight_per_lang', type=int, default=None,
+    parser.add_argument('--max_inflight_per_lang', type=int, default=8,
                         help="Limit in-flight Lambda requests per language; set <=0 to disable. "
                              "Defaults to min(8, --max_inflight_total).")
 
