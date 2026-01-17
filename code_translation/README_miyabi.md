@@ -1,5 +1,5 @@
 # miyabiにおけるCodeScopeの評価実行
-## 1. 環境構築について
+## 1. 推論時の環境構築について
 推論ではminicondaからvllmをインストールして実行しています。具体的には松尾岩澤研のnotionを参考にして下さい。  
 以下は実行時のmoduleと環境変数の設定および構築済みの環境の情報です。
 ```
@@ -199,7 +199,7 @@ zipp==3.23.0
 推論結果はデフォルトだと./resultディレクトリに保存されます。
 
 ## 3. 評価
-./evaluator/run_multiple.pyを実行してください。  
+./run_eval.shを参考に./evaluator/run_multiple.pyを実行してください。  
 ```
 python evaluator/run_multiple.py --jsonl_path ./result/test.jsonl  --output_path ./result/scores_test.json
 ```
