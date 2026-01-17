@@ -204,3 +204,7 @@ zipp==3.23.0
 python evaluator/run_multiple.py --jsonl_path ./result/test.jsonl  --output_path ./result/scores_test.json
 ```
 AWS lambda上の各言語評価関数にリクエストを出し、戻ってきた結果を集計します。  
+
+## Appendix: オリジナルのCodeScopeからの変更点
+1. オリジナルではtestcasesのうち最初の1つしか使っていなかったが、全て使うように変更
+2. testcasesを全て使った結果、正解コードでもエラーが出るようになったコードについてはコードまたはtestcasesを修正。何が問題か特定できなかったものに関しては除外。具体的には./convert_data.pyによって変換
