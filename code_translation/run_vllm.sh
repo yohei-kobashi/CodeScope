@@ -22,10 +22,10 @@ export CUDAHOSTCXX="$CXX"
 export PYTHONNOUSERSITE=1
 cd CodeScope/code_translation
 # Qwen3-Coder 30B base model
-python inference/run_vllm.py --model /work/go25/share/model/Qwen2.5_Coder_7B_grpo_0116 --result_save_name code_translation_eval_Qwen2.5_Coder_7B_grpo_0116.jsonl --log_file_name code_translation_eval_Qwen2.5_Coder_7B_grpo_0116.log --use_sft_prompt_template --enforce_eager True
+python inference/run_vllm.py --model /work/go25/share/model/Qwen2.5_Coder_7B_grpo_0116/checkpoint-68 --result_save_name code_translation_eval_Qwen2.5_Coder_7B_grpo_0116.jsonl --log_file_name code_translation_eval_Qwen2.5_Coder_7B_grpo_0116.log --use_sft_prompt_template --enforce_eager True
 
 # # Seed-Coder-8B base model
-python inference/run_vllm.py --model /work/go25/share/model/Qwen2.5_Coder_7B_drgrpo_0116 --result_save_name code_translation_eval_Qwen2.5_Coder_7B_drgrpo_0116.jsonl --log_file_name code_translation_eval_Qwen2.5_Coder_7B_drgrpo_0116.log --use_sft_prompt_template --enforce_eager True
+python inference/run_vllm.py --model /work/go25/share/model/Qwen2.5_Coder_7B_drgrpo_0116/checkpoint-68 --result_save_name code_translation_eval_Qwen2.5_Coder_7B_drgrpo_0116.jsonl --log_file_name code_translation_eval_Qwen2.5_Coder_7B_drgrpo_0116.log --use_sft_prompt_template --enforce_eager True
 
 # Qwen2.5-Coder-7B-Instruct base model
-python inference/run_vllm.py --model /work/go25/share/model/Qwen2.5_Coder_7B_dapo_0116  --result_save_name code_translation_eval_Qwen2.5_Coder_7B_dapo_0116.jsonl --log_file_name code_translation_eval_Qwen2.5_Coder_7B_dapo_0116.log --use_sft_prompt_template --enforce_eager True
+python inference/run_vllm.py --model /work/go25/share/model/Qwen2.5_Coder_7B_dapo_0116/checkpoint-68 --result_save_name code_translation_eval_Qwen2.5_Coder_7B_dapo_0116.jsonl --log_file_name code_translation_eval_Qwen2.5_Coder_7B_dapo_0116.log --use_sft_prompt_template --enforce_eager True
