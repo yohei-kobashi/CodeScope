@@ -211,6 +211,7 @@ def strip_code_block_wrappers(source_code: str) -> str:
     """Remove markdown-style code fences and surrounding text."""
     if not source_code:
         return ""
+    source_code = re.sub(r"```\s*[#\*]* *(?:Explanation|Note).*", "", source_code, flags=re.DOTALL)
     stripped = re.sub(r"^.*?```[^\n]*\n", "", source_code, flags=re.DOTALL)
     stripped = re.sub(r"```\n.*$", "", stripped, flags=re.DOTALL)
     stripped = stripped.replace("```", "")
