@@ -925,7 +925,7 @@ def exe_main():
     invalid_num = len(output_dict["invalid"].keys())
     overall_accuracy = correct_sum / code_sum if code_sum else 0
     print("code_sum:", code_sum, " correct_sum: ", correct_sum, " wrong_num: ", wrong_num, " error_num: ", error_num,
-          " accurancy: ", overall_accuracy)
+          " accuracy: ", overall_accuracy)
     for lang, stats in per_language_totals.items():
         lang_code_sum = stats["code_sum"]
         lang_accuracy = stats["correct_sum"] / lang_code_sum if lang_code_sum else 0
@@ -944,7 +944,7 @@ def exe_main():
     lambda_error_rate = invalid_sum / total_attempts if total_attempts else 0
     output_dict["info"] = {"code_sum": code_sum, "correct_sum": correct_sum, "wrong_num": wrong_num, "error_num":
         error_num, "invalid_num": invalid_num, "lambda_error_rate": lambda_error_rate, "aborted": aborted,
-        "accurancy": overall_accuracy}
+        "accuracy": overall_accuracy}
     per_language_summary = {}
     for lang, stats in per_language_totals.items():
         lang_code_sum = stats["code_sum"]
