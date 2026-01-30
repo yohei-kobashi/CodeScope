@@ -2,7 +2,6 @@
 #PBS -q short-c
 #PBS -l select=1
 #PBS -W group_list=go25
-#PBS -l walltime=03:00:00
 #PBS -j oe
 
 cd CodeScope
