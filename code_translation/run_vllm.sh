@@ -26,9 +26,7 @@ module load singularity/4.2.1
 
 singularity exec --nv --bind /work/go25:/work/go25 /work/gj26/share/sif/vllm_v0.21.0.sif bash <<'EOF'
 cd CodeScope/code_translation
-
-python3 inference/run_vllm.py --model /work/go25/share/model/code_trans_grpo_model_0409/Qwen3.5_4B_grpo_reward30b/global_step_194 --result_save_name code_translation_eval_Qwen3.5_4B_grpo_reward30b.jsonl --log_file_name code_translation_eval_Qwen3.5_4B_grpo_reward30b.log --use_sft_prompt_template --enforce_eager True
+python3 inference/run_vllm.py --model /work/go25/share/model/code_trans_grpo_model_0409/Qwen2.5_Coder_7B_grpo_reward80b/global_step_194 --result_save_name code_translation_eval_Qwen2.5_7B_grpo_reward80b.jsonl --log_file_name code_translation_eval_Qwen2.5_7B_grpo_reward80b.log --use_sft_prompt_template --enforce_eager True
 python3 inference/run_vllm.py --model /work/go25/share/model/code_trans_grpo_model_0409/Qwen3.5_4B_grpo_reward7b/global_step_194 --result_save_name code_translation_eval_Qwen3.5_4B_grpo_reward7b.jsonl --log_file_name code_translation_eval_Qwen3.5_4B_grpo_reward7b.log --use_sft_prompt_template --enforce_eager True
 python3 inference/run_vllm.py --model /work/go25/share/model/code_trans_grpo_model_0409/Qwen3.5_4B_grpo_reward80b/global_step_194 --result_save_name code_translation_eval_Qwen3.5_4B_grpo_reward80b.jsonl --log_file_name code_translation_eval_Qwen3.5_4B_grpo_reward80b.log --use_sft_prompt_template --enforce_eager True
-python3 inference/run_vllm.py --model /work/go25/share/model/code_trans_grpo_model_0409/Qwen2.5_Coder_7B_grpo_reward80b/global_step_194 --result_save_name code_translation_eval_Qwen2.5_7B_grpo_reward80b.jsonl --log_file_name code_translation_eval_Qwen2.5_7B_grpo_reward80b.log --use_sft_prompt_template --enforce_eager True
 EOF
