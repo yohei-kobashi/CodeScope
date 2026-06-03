@@ -18,6 +18,7 @@ import sys
 import math
 import re
 import random
+import subprocess
 import threading
 import concurrent.futures
 from contextlib import contextmanager
@@ -66,6 +67,114 @@ TOTAL_INFLIGHT_LIMITER: threading.BoundedSemaphore | None = None
 LANG_INFLIGHT_LIMITERS: dict[str, threading.BoundedSemaphore] = {}
 LANG_LIMITER_LOCK = threading.Lock()
 SINGULARITY_EVALUATOR: SingularityEvaluator | None = None
+
+
+CPP_COMPILE_ONCE_RUNNER = r"""
+import json
+import os
+import sys
+import tempfile
+import traceback
+from pathlib import Path
+
+import eval_cpp
+from safe_subprocess import run
+
+
+def _response(result):
+    return {"ok": True, "result": result}
+
+
+def _compile_error_response(build_result, testcase):
+    return _response({
+        "status": "SyntaxError",
+        "exit_code": build_result.exit_code,
+        "stdout": build_result.stdout,
+        "stderr": build_result.stderr,
+        "input": testcase.get("input", ""),
+        "expected_output": testcase.get("expected_output", []),
+        "matched": False,
+    })
+
+
+try:
+    payload = json.load(sys.stdin)
+    source_code = payload["source_code"]
+    testcases = payload.get("testcases", [])
+    compile_timeout = int(payload.get("compile_timeout", 120))
+
+    source_path = None
+    binary_path = None
+    responses = []
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".cpp", delete=False) as source_file:
+            source_file.write(source_code.encode("utf-8"))
+            source_file.flush()
+            source_path = Path(source_file.name)
+
+        binary_path = source_path.with_suffix("")
+        build_result = run(
+            ["g++", str(source_path), "-o", str(binary_path), "-std=c++17"],
+            timeout_seconds=compile_timeout,
+            max_output_size=8192,
+        )
+        if build_result.exit_code != 0:
+            responses = [_compile_error_response(build_result, testcase) for testcase in testcases]
+        else:
+            for testcase in testcases:
+                input_data = testcase.get("input", "")
+                expected_outputs = testcase.get("expected_output", [])
+                run_result = eval_cpp._run_cpp(binary_path, input_data=input_data)
+                if run_result.timeout:
+                    status = "Timeout"
+                elif run_result.exit_code != 0:
+                    status = "Exception"
+                else:
+                    status = "OK"
+
+                converted_expected = [eval_cpp._convert_for_compare(item) for item in expected_outputs]
+                converted_stdout = eval_cpp._convert_for_compare(run_result.stdout)
+                matched = bool(converted_expected) and len(converted_stdout) == len(converted_expected[0]) and any(
+                    all(
+                        eval_cpp._compare_values(output, expected)
+                        for output, expected in zip(converted_stdout, candidate)
+                    )
+                    for candidate in converted_expected
+                )
+
+                responses.append(_response({
+                    "status": status,
+                    "exit_code": run_result.exit_code,
+                    "stdout": run_result.stdout,
+                    "stderr": run_result.stderr,
+                    "input": input_data,
+                    "expected_output": expected_outputs,
+                    "matched": matched,
+                }))
+    finally:
+        for path in (binary_path, source_path):
+            try:
+                if path is not None and Path(path).exists():
+                    os.remove(path)
+            except Exception:
+                pass
+
+    print(json.dumps({"responses": responses}, ensure_ascii=True))
+except Exception:
+    print(json.dumps({
+        "responses": [{
+            "ok": False,
+            "error": traceback.format_exc(),
+            "result": {
+                "status": "Exception",
+                "exit_code": -1,
+                "stdout": "",
+                "stderr": traceback.format_exc(),
+                "matched": False,
+            },
+        }]
+    }, ensure_ascii=True))
+"""
 
 
 def normalize_language_key(lang: str) -> str:
@@ -150,9 +259,22 @@ def extract_translations(content: dict) -> Sequence[Tuple[str, str]]:
 def normalize_for_compare(text: str | None) -> str:
     if text is None:
         return ""
+    text = remove_runtime_noise(text)
     normalized = text.replace("\r\n", "\n").replace("\r", "\n")
     normalized = normalized.replace(" ", "").lower().strip()
     return normalized
+
+
+def remove_runtime_noise(text: str) -> str:
+    noise_patterns = (
+        r"^\[[0-9.]+s\]\[warning\]\[perf,memops\] Cannot use file /tmp/hsperfdata_.*$",
+    )
+    lines = []
+    for line in text.splitlines():
+        if any(re.match(pattern, line) for pattern in noise_patterns):
+            continue
+        lines.append(line)
+    return "\n".join(lines)
 
 
 def strip_code_block_wrappers(source_code: str) -> str:
@@ -267,6 +389,56 @@ def invoke_singularity_executor(lang_key: str, source_code: str, input_data: str
     }, debug_info
 
 
+def run_singularity_python_runner(runner_source: str, payload: dict, timeout: float) -> list[dict]:
+    if SINGULARITY_EVALUATOR is None:
+        raise RuntimeError("Singularity evaluator is not initialized")
+
+    cmd = [
+        SINGULARITY_EVALUATOR.runtime,
+        "exec",
+    ]
+    if SINGULARITY_EVALUATOR.cleanenv:
+        cmd.append("--cleanenv")
+    for bind in SINGULARITY_EVALUATOR.binds:
+        cmd.extend(["--bind", bind])
+    if SINGULARITY_EVALUATOR.pwd:
+        cmd.extend(["--pwd", SINGULARITY_EVALUATOR.pwd])
+    cmd.extend([SINGULARITY_EVALUATOR.image, "python3", "-c", runner_source])
+
+    proc = subprocess.run(
+        cmd,
+        input=json.dumps(payload),
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=timeout,
+    )
+    if proc.returncode != 0:
+        raise SingularityEvaluationError(
+            f"{SINGULARITY_EVALUATOR.runtime} exited with status {proc.returncode}",
+            returncode=proc.returncode,
+            stderr=proc.stderr,
+        )
+
+    try:
+        output_payload = json.loads(proc.stdout)
+    except json.JSONDecodeError as exc:
+        raise SingularityEvaluationError(
+            "Evaluator returned non-JSON output",
+            returncode=proc.returncode,
+            stderr=(proc.stderr + "\nstdout:\n" + proc.stdout),
+        ) from exc
+
+    responses = output_payload.get("responses")
+    if not isinstance(responses, list):
+        raise SingularityEvaluationError(
+            "Evaluator JSON did not contain a responses list",
+            returncode=proc.returncode,
+            stderr=(proc.stderr + "\nstdout:\n" + proc.stdout),
+        )
+    return responses
+
+
 def invoke_singularity_batch(lang_key: str, source_code: str, testcases: list[dict],
                              submission_id: str, verbose: bool = False, debug_info: dict | None = None):
     if debug_info is None:
@@ -300,7 +472,18 @@ def invoke_singularity_batch(lang_key: str, source_code: str, testcases: list[di
         }
 
     with _semaphore_guard(TOTAL_INFLIGHT_LIMITER), _semaphore_guard(get_lang_inflight_limiter(lang_key)):
-        responses = SINGULARITY_EVALUATOR.eval_batch(requests, timeout=batch_timeout)
+        if lang_key == "cpp":
+            responses = run_singularity_python_runner(
+                CPP_COMPILE_ONCE_RUNNER,
+                {
+                    "source_code": source_code,
+                    "testcases": requests,
+                    "compile_timeout": int(getattr(args, "compile_timeout", 120)),
+                },
+                timeout=batch_timeout,
+            )
+        else:
+            responses = SINGULARITY_EVALUATOR.eval_batch(requests, timeout=batch_timeout)
 
     if len(responses) != len(testcases):
         raise SingularityEvaluationError(
@@ -1136,6 +1319,8 @@ if __name__ == '__main__':
     parser.add_argument('--language', type=str, default=None,
                         help="Override language hint instead of inferring from file name")
     parser.add_argument('--request_timeout', type=float, default=900.0)
+    parser.add_argument('--compile_timeout', type=int, default=120,
+                        help="Seconds to allow for one compile step in compile-once evaluators such as C++")
     parser.add_argument('--batch_timeout', type=float, default=None,
                         help="Total timeout for one eval_batch call. Defaults to request_timeout * batch_size")
     parser.add_argument('--max_container_error_rate', type=float, default=-1.0,
