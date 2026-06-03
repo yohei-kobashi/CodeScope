@@ -42,6 +42,15 @@ if [[ ! -d "${MULTIPLE_E_EVALUATION_DIR}" ]]; then
   exit 1
 fi
 
+if ! python -c "import func_timeout" >/dev/null 2>&1; then
+  echo "Missing Python package: func_timeout" >&2
+  echo "Install it in the active environment with:" >&2
+  echo "  python -m pip install func-timeout" >&2
+  echo "or reinstall code_translation dependencies with:" >&2
+  echo "  python -m pip install -r requirement.txt" >&2
+  exit 1
+fi
+
 mkdir -p "$(dirname "${OUTPUT_PATH}")"
 
 COMMON_ARGS=(

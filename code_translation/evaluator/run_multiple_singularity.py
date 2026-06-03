@@ -8,6 +8,8 @@ Usage:
    `python CodeScope/code_translation/evaluator/run_multiple_singularity.py --jsonl_path data/sample.jsonl --output_path results/executed_result.json --singularity_image /path/to/multipl-e-eval_sandbox`
 """
 
+from __future__ import annotations
+
 import argparse
 import json
 import ast
