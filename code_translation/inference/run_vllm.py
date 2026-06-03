@@ -195,6 +195,20 @@ def batched(iterable: Sequence[Any], batch_size: int) -> Iterable[Sequence[Any]]
         yield iterable[start_idx:start_idx + batch_size]
 
 
+def output_token_count(tokenizer, sequence: Any, text: str) -> int:
+    token_ids = getattr(sequence, 'token_ids', None)
+    if token_ids is not None:
+        return len(token_ids)
+    return count_tokens(tokenizer, text)
+
+
+def reached_max_tokens(sequence: Any, token_count: int, max_tokens: int) -> bool:
+    finish_reason = (getattr(sequence, 'finish_reason', None) or '').lower()
+    if finish_reason == 'length':
+        return True
+    return token_count >= max_tokens
+
+
 def main() -> None:
     load_path = Path(__file__).parent.parent.parent / Path('data') / Path(args.data_load_name)
     save_path = Path(__file__).parent.parent / Path('result') / Path(args.result_save_name)
@@ -242,6 +256,9 @@ def main() -> None:
     )
 
     all_generations: List[List[str]] = [[] for _ in records]
+    all_generation_infos: List[List[Dict[str, Any]]] = [[] for _ in records]
+    total_generations = 0
+    max_token_generations = 0
     request_indices = list(range(len(prompts)))
     for batch_indices in batched(request_indices, args.batch_size):
         batch_prompts = [prompts[i] for i in batch_indices]
@@ -257,20 +274,53 @@ def main() -> None:
         for req_idx, request_output in zip(batch_indices, batch_outputs):
             sequences = sorted(request_output.outputs, key=lambda item: item.index)
             generation_texts = [seq.text.strip() for seq in sequences]
+            generation_infos = []
+            for seq, generated in zip(sequences, generation_texts):
+                output_tokens = output_token_count(tokenizer, seq, generated)
+                finish_reason = getattr(seq, 'finish_reason', None)
+                hit_max_tokens = reached_max_tokens(seq, output_tokens, args.max_new_tokens)
+                total_generations += 1
+                if hit_max_tokens:
+                    max_token_generations += 1
+                generation_infos.append({
+                    'finish_reason': finish_reason,
+                    'output_tokens': output_tokens,
+                    'reached_max_tokens': hit_max_tokens,
+                })
             all_generations[req_idx] = generation_texts
+            all_generation_infos[req_idx] = generation_infos
             logging.info('response: %s', generation_texts)
 
-    for example, generations in zip(records, all_generations):
+    for example, generations, generation_infos in zip(records, all_generations, all_generation_infos):
         for idx, generated in enumerate(generations):
-            output_tokens = count_tokens(tokenizer, generated)
+            info = generation_infos[idx] if idx < len(generation_infos) else {}
+            output_tokens = info.get('output_tokens')
+            if output_tokens is None:
+                output_tokens = count_tokens(tokenizer, generated)
             logging.info('output tokens: %d', output_tokens)
+            if info.get('reached_max_tokens'):
+                logging.warning('Reached max_new_tokens %s src_uid: %s lang: %s candidate: %d finish_reason: %s',
+                                args.max_new_tokens, example.get('src_uid'),
+                                example.get('target_lang_cluster'), idx, info.get('finish_reason'))
             if output_tokens > args.max_new_tokens:
                 logging.warning('Over total tokens limit %s lang: %s', example.get('src_uid'),
                                 example.get('target_lang_cluster'))
                 generated = ''
             example[f'code_translation_{idx}'] = generated
+            example[f'code_translation_{idx}_finish_reason'] = info.get('finish_reason')
+            example[f'code_translation_{idx}_output_tokens'] = output_tokens
+            example[f'code_translation_{idx}_reached_max_tokens'] = bool(info.get('reached_max_tokens'))
         for pad_idx in range(len(generations), args.candidate_num):
             example[f'code_translation_{pad_idx}'] = ''
+            example[f'code_translation_{pad_idx}_finish_reason'] = None
+            example[f'code_translation_{pad_idx}_output_tokens'] = 0
+            example[f'code_translation_{pad_idx}_reached_max_tokens'] = False
+
+    max_token_rate = max_token_generations / total_generations if total_generations else 0.0
+    logging.info('max_new_tokens reached: %d/%d (%.4f)',
+                 max_token_generations, total_generations, max_token_rate)
+    print('max_new_tokens reached:', max_token_generations, '/', total_generations,
+          f'({max_token_rate:.4f})')
 
     save_path.parent.mkdir(parents=True, exist_ok=True)
     dataset_with_outputs = Dataset.from_list(records)
