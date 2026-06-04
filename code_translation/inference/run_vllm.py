@@ -1,5 +1,7 @@
 import argparse
 import logging
+import math
+import random
 import warnings
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence
@@ -47,6 +49,11 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument('--max_new_tokens', default=2048, type=int)
     parser.add_argument('--batch_size', default=32, type=int,
                         help='Number of prompts to send per vLLM generate call.')
+    parser.add_argument('--random_sample_ratio', default=1.0, type=float,
+                        help='Randomly sample this ratio of tasks before inference. '
+                             'Use 1.0 to evaluate all tasks.')
+    parser.add_argument('--random_sample_seed', default=None, type=int,
+                        help='Seed for --random_sample_ratio.')
     parser.add_argument('--use_sft_prompt_template', action='store_true',
                         help='Use chat-style SFT prompt template requiring tokenizer.apply_chat_template.')
     parser.add_argument('--enforce_eager', nargs='?', default=None, type=_str_to_bool,
@@ -195,6 +202,22 @@ def batched(iterable: Sequence[Any], batch_size: int) -> Iterable[Sequence[Any]]
         yield iterable[start_idx:start_idx + batch_size]
 
 
+def sample_records(records: List[Dict[str, Any]], sample_ratio: float,
+                   seed: Optional[int]) -> List[Dict[str, Any]]:
+    if sample_ratio <= 0.0 or sample_ratio > 1.0:
+        raise ValueError('--random_sample_ratio must be in the range (0.0, 1.0].')
+    if sample_ratio >= 1.0 or not records:
+        logging.info('Using all %d records.', len(records))
+        return records
+
+    sample_size = max(1, math.ceil(len(records) * sample_ratio))
+    rng = random.Random(seed)
+    sampled_indices = sorted(rng.sample(range(len(records)), sample_size))
+    logging.info('Randomly sampled %d/%d records with ratio %.6f and seed %s.',
+                 sample_size, len(records), sample_ratio, seed)
+    return [records[idx] for idx in sampled_indices]
+
+
 def output_token_count(tokenizer, sequence: Any, text: str) -> int:
     token_ids = getattr(sequence, 'token_ids', None)
     if token_ids is not None:
@@ -216,6 +239,7 @@ def main() -> None:
     dataset = load_dataset('json', split='train', data_files=str(load_path))
     dataset.cleanup_cache_files()
     records: List[Dict[str, Any]] = dataset.to_list()
+    records = sample_records(records, args.random_sample_ratio, args.random_sample_seed)
 
     resolved_dtype = infer_model_dtype(
         args.model,
