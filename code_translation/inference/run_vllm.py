@@ -37,14 +37,29 @@ def parse_arguments() -> argparse.Namespace:
                         help='Model weights dtype for vLLM (e.g., float16, bfloat16).')
     parser.add_argument('--download_dir', default=None, type=str,
                         help='Cache directory for model weights.')
+    parser.add_argument('--gpu_memory_utilization', default=None, type=float,
+                        help='Optional vLLM GPU memory utilization limit.')
+    parser.add_argument('--max_num_batched_tokens', default=None, type=int,
+                        help='Optional vLLM scheduler token budget per iteration.')
+    parser.add_argument('--max_num_seqs', default=None, type=int,
+                        help='Optional maximum number of active sequences in vLLM.')
+    parser.add_argument('--enable_prefix_caching', action='store_true',
+                        help='Enable vLLM prefix caching.')
     parser.add_argument('--trust_remote_code', action='store_true',
                         help='Allow execution of remote code during model loading.')
     parser.add_argument('--data_load_name', default='code_translation_data.jsonl', type=str)
     parser.add_argument('--result_save_name', default='code_translation_eval_vllm.jsonl', type=str)
     parser.add_argument('--log_file_name', default='code_translation_eval_vllm.log', type=str)
+    parser.add_argument('--do_sample', '--do-sample', dest='do_sample', nargs='?',
+                        default=True, const=True, type=_str_to_bool)
     parser.add_argument('--temperature', default=0.5, type=float)
-    parser.add_argument('--top_p', default=0.95, type=float)
-    parser.add_argument('--top_k', default=50, type=int)
+    parser.add_argument('--top_p', '--top-p', dest='top_p', default=0.95, type=float)
+    parser.add_argument('--top_k', '--top-k', dest='top_k', default=50, type=int)
+    parser.add_argument('--min_p', '--min-p', dest='min_p', default=0.0, type=float)
+    parser.add_argument('--presence_penalty', '--presence-penalty', dest='presence_penalty',
+                        default=0.0, type=float)
+    parser.add_argument('--repetition_penalty', '--repetition-penalty', dest='repetition_penalty',
+                        default=1.0, type=float)
     parser.add_argument('--candidate_num', default=1, type=int)
     parser.add_argument('--max_new_tokens', default=2048, type=int)
     parser.add_argument('--batch_size', default=32, type=int,
@@ -260,6 +275,14 @@ def main() -> None:
     }
     if args.enforce_eager is not None:
         llm_kwargs['enforce_eager'] = args.enforce_eager
+    if args.gpu_memory_utilization is not None:
+        llm_kwargs['gpu_memory_utilization'] = args.gpu_memory_utilization
+    if args.max_num_batched_tokens is not None:
+        llm_kwargs['max_num_batched_tokens'] = args.max_num_batched_tokens
+    if args.max_num_seqs is not None:
+        llm_kwargs['max_num_seqs'] = args.max_num_seqs
+    if args.enable_prefix_caching:
+        llm_kwargs['enable_prefix_caching'] = True
 
     llm = LLM(**llm_kwargs)
     tokenizer = llm.get_tokenizer()
@@ -272,9 +295,12 @@ def main() -> None:
         prompts.append(prompt)
 
     sampling_params = SamplingParams(
-        temperature=args.temperature,
+        temperature=args.temperature if args.do_sample else 0.0,
         top_p=args.top_p,
         top_k=args.top_k if args.top_k >= 0 else -1,
+        min_p=args.min_p,
+        presence_penalty=args.presence_penalty,
+        repetition_penalty=args.repetition_penalty,
         max_tokens=args.max_new_tokens,
         n=args.candidate_num,
     )

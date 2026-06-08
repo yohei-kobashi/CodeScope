@@ -241,6 +241,20 @@ def summarize_pass_metrics(group_results: Dict[Tuple[str, str], List[bool]]) -> 
     return summary
 
 
+def summarize_pass_metric_averages(pass_summary: Dict[str, dict]) -> Dict[str, float]:
+    aggregate_metrics: Dict[str, float] = {}
+    for metric_name in ("pass@1", "pass@5", "pass@10"):
+        values = [entry[metric_name] for entry in pass_summary.values() if metric_name in entry]
+        if not values:
+            continue
+        mean_value = sum(values) / len(values)
+        aggregate_metrics[f"{metric_name}_mean"] = mean_value
+        if metric_name == "pass@1":
+            variance = sum((value - mean_value) ** 2 for value in values) / len(values)
+            aggregate_metrics["pass@1_std"] = math.sqrt(variance)
+    return aggregate_metrics
+
+
 def extract_translations(content: dict) -> Sequence[Tuple[str, str]]:
     translations: List[Tuple[str, str]] = []
     prefix = "code_translation_"
@@ -1266,11 +1280,18 @@ def exe_main():
               f"error_num: {stats['error_num']} invalid_num: {stats['invalid_num']} "
               f"accuracy: {pair_accuracy}")
     pass_summary = summarize_pass_metrics(group_results)
+    pass_metric_averages = summarize_pass_metric_averages(pass_summary)
+    if pass_metric_averages:
+        pass_metric_text = " ".join(
+            f"{metric_name}: {metric_value}"
+            for metric_name, metric_value in sorted(pass_metric_averages.items())
+        )
+        print(f"[PassMetrics] {pass_metric_text}")
     total_attempts = code_sum + invalid_sum
     container_error_rate = invalid_sum / total_attempts if total_attempts else 0
     output_dict["info"] = {"code_sum": code_sum, "correct_sum": correct_sum, "wrong_num": wrong_num, "error_num":
         error_num, "invalid_num": invalid_num, "container_error_rate": container_error_rate, "aborted": aborted,
-        "accuracy": overall_accuracy}
+        "accuracy": overall_accuracy, **pass_metric_averages}
     per_language_summary = {}
     for lang, stats in per_language_totals.items():
         lang_code_sum = stats["code_sum"]

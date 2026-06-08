@@ -25,21 +25,34 @@ module load nvidia/25.9
 module load singularity/4.2.1
 
 singularity exec --nv --bind /work/go25:/work/go25 /work/gj26/share/sif/vllm_v0.21.0.sif bash <<'EOF'
-cd CodeScope/code_translation
+model_name=Qwen/Qwen3.5-4B
+run_name=Qwen3.5-4B
 
+export CC="$(command -v gcc)"
+export CXX="$(command -v g++)"
+export TRITON_CC="$CC"
+export TRITON_CXX="$CXX"
+export CUDAHOSTCXX="$CXX"
+
+cd CodeScope/code_translation
 BATCH_SIZE=128
-MAX_NEW_TOKENS=2048
-CANDIDATE_NUM=1
+MAX_NEW_TOKENS=8192
+MAX_MODEL_LEN=8192
+MAX_NUM_BATCHED_TOKENS=131072
+CANDIDATE_NUM=5
 USE_SFT_PROMPT_TEMPLATE=true
-ENFORCE_EAGER=True
+ENFORCE_EAGER=False
+GPU_MEMORY_UTILIZATION=0.90
 
 MODEL_NAMES=(
+  "Qwen/Qwen3.5-4B"
   "/work/go25/share/model/code_trans_grpo_model_0409/Qwen2.5_Coder_7B_grpo_reward30b/global_step_194"
   "/work/go25/share/model/code_trans_grpo_model_0409/Qwen3.5_4B_grpo_reward7b/global_step_194"
   "/work/go25/share/model/code_trans_grpo_model_0409/Qwen3.5_4B_grpo_reward80b/global_step_194"
 )
 
 RUN_NAMES=(
+  "Qwen3.5-4B"
   "Qwen2.5_7B_grpo_reward30b_2"
   "Qwen3.5_4B_grpo_reward7b"
   "Qwen3.5_4B_grpo_reward80b_2"
@@ -48,38 +61,29 @@ RUN_NAMES=(
 common_args=(
   --batch_size "$BATCH_SIZE"
   --candidate_num "$CANDIDATE_NUM"
+  --max_model_len "$MAX_MODEL_LEN"
   --enforce_eager "$ENFORCE_EAGER"
+  --gpu_memory_utilization "$GPU_MEMORY_UTILIZATION"
+  --max_num_batched_tokens "$MAX_NUM_BATCHED_TOKENS"
+  --max_num_seqs "$BATCH_SIZE"
 )
 
 if [[ "$USE_SFT_PROMPT_TEMPLATE" == "true" ]]; then
   common_args+=(--use_sft_prompt_template)
 fi
 
-max_tokens_for_model() {
-  local model_name="$1"
-
-  case "$model_name" in
-    *Qwen3.5_4B_grpo_reward80b*|*Qwen3.5-4B*reward80b*)
-      echo 4096
-      ;;
-    *)
-      echo "$MAX_NEW_TOKENS"
-      ;;
-  esac
-}
-
 sampling_args_for_model() {
   local model_name="$1"
 
   case "$model_name" in
     *Qwen3.5*|*qwen3.5*)
-      echo "--temperature 0.6 --top_p 0.95 --top_k 20"
+      echo "--do_sample true --temperature 0.6 --top_p 0.95 --top_k 20 --min_p 0.0 --presence_penalty 0.0 --repetition_penalty 1.0"
       ;;
     *Qwen2.5-Coder-7B-Instruct*|*Qwen2.5_Coder_7B*|*qwen2.5_coder_7b*)
-      echo "--temperature 0.7 --top_p 0.8 --top_k 20"
+      echo "--do_sample true --temperature 0.7 --top_p 0.8 --top_k 20 --repetition_penalty 1.1"
       ;;
     *)
-      echo "--temperature 0.5 --top_p 0.95 --top_k 50"
+      echo "--do_sample true"
       ;;
   esac
 }
@@ -87,7 +91,7 @@ sampling_args_for_model() {
 for model_index in "${!MODEL_NAMES[@]}"; do
   model_name="${MODEL_NAMES[$model_index]}"
   run_name="${RUN_NAMES[$model_index]}"
-  max_new_tokens="$(max_tokens_for_model "$model_name")"
+  max_new_tokens="$MAX_NEW_TOKENS"
   read -r -a sampling_args <<< "$(sampling_args_for_model "$model_name")"
 
   result_save_name="code_translation_eval_${run_name}.jsonl"
@@ -100,6 +104,7 @@ for model_index in "${!MODEL_NAMES[@]}"; do
     --max_new_tokens "$max_new_tokens" \
     --result_save_name "$result_save_name" \
     --log_file_name "$log_file_name" \
+    --random_sample_ratio 0.03 \
     "${common_args[@]}" \
     "${sampling_args[@]}"
 done
