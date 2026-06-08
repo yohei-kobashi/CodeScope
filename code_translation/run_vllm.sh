@@ -25,8 +25,6 @@ module load nvidia/25.9
 module load singularity/4.2.1
 
 singularity exec --nv --bind /work/go25:/work/go25 /work/gj26/share/sif/vllm_v0.21.0.sif bash <<'EOF'
-model_name=Qwen/Qwen3.5-4B
-run_name=Qwen3.5-4B
 
 export CC="$(command -v gcc)"
 export CXX="$(command -v g++)"
@@ -45,17 +43,33 @@ ENFORCE_EAGER=False
 GPU_MEMORY_UTILIZATION=0.90
 
 MODEL_NAMES=(
+  "Qwen/Qwen2.5-Coder-7B-Instruct"
   "Qwen/Qwen3.5-4B"
+  "/work/go25/share/model/code_trans_grpo_model_0409/Qwen2.5_Coder_7B_grpo_reward7b/global_step_194"
   "/work/go25/share/model/code_trans_grpo_model_0409/Qwen2.5_Coder_7B_grpo_reward30b/global_step_194"
+  "/work/go25/share/model/code_trans_grpo_model_0409/Qwen2.5_Coder_7B_grpo_reward80b/global_step_194"
   "/work/go25/share/model/code_trans_grpo_model_0409/Qwen3.5_4B_grpo_reward7b/global_step_194"
+  "/work/go25/share/model/code_trans_grpo_model_0409/Qwen3.5_4B_grpo_reward30b/global_step_194"
   "/work/go25/share/model/code_trans_grpo_model_0409/Qwen3.5_4B_grpo_reward80b/global_step_194"
+  "/work/go25/share/model/code_trans_grpo_model_0409/Qwen2.5_Coder_7B_grpo_reward30b_v2/global_step_100"
+  "/work/go25/share/model/code_trans_grpo_model_0409/Qwen2.5_Coder_7B_grpo_reward30b_v2/global_step_194"
+  "/work/go25/share/model/code_trans_grpo_model_0409/Qwen3.5_4B_grpo_reward30b_v2/global_step_100"
+  "/work/go25/share/model/code_trans_grpo_model_0409/Qwen3.5_4B_grpo_reward30b_v2/global_step_194"
 )
 
 RUN_NAMES=(
-  "Qwen3.5-4B"
-  "Qwen2.5_7B_grpo_reward30b_2"
-  "Qwen3.5_4B_grpo_reward7b"
-  "Qwen3.5_4B_grpo_reward80b_2"
+  "evaluation_qwen2.5"
+  "evaluation_qwen3.5"
+  "evaluation_qwen2.5_grpo_reward7b"
+  "evaluation_qwen2.5_grpo_reward30b"
+  "evaluation_qwen2.5_grpo_reward80b"
+  "evaluation_qwen3.5_grpo_reward7b"
+  "evaluation_qwen3.5_grpo_reward30b"
+  "evaluation_qwen3.5_grpo_reward80b"
+  "evaluation_qwen2.5_grpo_reward30b_v2_100"
+  "evaluation_qwen2.5_grpo_reward30b_v2_194"
+  "evaluation_qwen3.5_grpo_reward80b_v2_100"
+  "evaluation_qwen3.5_grpo_reward80b_v2_194"
 )
 
 common_args=(
