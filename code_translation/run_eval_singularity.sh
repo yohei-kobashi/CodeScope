@@ -62,12 +62,29 @@ if [[ -n "${BATCH_TIMEOUT}" ]]; then
   COMMON_ARGS+=(--batch_timeout "${BATCH_TIMEOUT}")
 fi
 
-python evaluator/run_multiple_singularity.py \
-  --jsonl_path result/code_translation_eval_Qwen2.5_Coder_7B_grpo_0123_code.jsonl \
-  --output_path result/eval_Qwen2.5_Coder_7B_grpo_0123_code_singularity.jsonl \
-  "${COMMON_ARGS[@]}"
+EVALUATION_RUNS=(
+  "qwen3.5_4b_instruct_max8192_defaultpp_seed42"
+  "qwen3.5_4b_instruct_max8192_pp0_seed42"
+  "qwen3.5_9b_instruct_max8192_defaultpp_seed42"
+  "qwen3.5_9b_instruct_max8192_pp0_seed42"
+  "qwen3.5_4b_grpo_0702_reward35b_nothink_step100_instruct_max8192_defaultpp_seed42"
+  "qwen3.5_4b_grpo_0702_reward35b_nothink_step100_instruct_max8192_pp0_seed42"
+  "qwen3.5_9b_grpo_0702_reward35b_nothink_step100_instruct_max8192_defaultpp_seed42"
+  "qwen3.5_9b_grpo_0702_reward35b_nothink_step100_instruct_max8192_pp0_seed42"
+)
 
-python evaluator/run_multiple_singularity.py \
-  --jsonl_path result/code_translation_eval_Qwen2.5_Coder_7B_grpo_0123_md.jsonl \
-  --output_path result/eval_Qwen2.5_Coder_7B_grpo_0123_md_singularity.jsonl \
-  "${COMMON_ARGS[@]}"
+for run_name in "${EVALUATION_RUNS[@]}"; do
+  input_path="result/code_translation_eval_${run_name}.jsonl"
+  output_path="result/eval_${run_name}_singularity.json"
+
+  if [[ ! -s "$input_path" ]]; then
+    echo "Missing or empty inference result: ${input_path}" >&2
+    exit 1
+  fi
+
+  echo "Evaluating ${input_path}"
+  python evaluator/run_multiple_singularity.py \
+    --jsonl_path "$input_path" \
+    --output_path "$output_path" \
+    "${COMMON_ARGS[@]}"
+done
