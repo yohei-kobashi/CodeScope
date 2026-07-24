@@ -19,9 +19,9 @@ SINGULARITY_RUNTIME="${SINGULARITY_RUNTIME:-singularity}"
 SINGULARITY_PWD="${SINGULARITY_PWD:-/code}"
 export MULTIPLE_E_EVALUATION_DIR
 
-MAX_WORKERS="${MAX_WORKERS:-4}"
-MAX_INFLIGHT_TOTAL="${MAX_INFLIGHT_TOTAL:-4}"
-MAX_INFLIGHT_PER_LANG="${MAX_INFLIGHT_PER_LANG:-2}"
+MAX_WORKERS="${MAX_WORKERS:-64}"
+MAX_INFLIGHT_TOTAL="${MAX_INFLIGHT_TOTAL:-64}"
+MAX_INFLIGHT_PER_LANG="${MAX_INFLIGHT_PER_LANG:-8}"
 REQUEST_TIMEOUT="${REQUEST_TIMEOUT:-900}"
 COMPILE_TIMEOUT="${COMPILE_TIMEOUT:-120}"
 BATCH_TIMEOUT="${BATCH_TIMEOUT:-}"
@@ -80,6 +80,11 @@ for run_name in "${EVALUATION_RUNS[@]}"; do
   if [[ ! -s "$input_path" ]]; then
     echo "Missing or empty inference result: ${input_path}" >&2
     exit 1
+  fi
+
+  if [[ -s "$output_path" ]]; then
+    echo "Skipping completed evaluation: ${output_path}"
+    continue
   fi
 
   echo "Evaluating ${input_path}"
