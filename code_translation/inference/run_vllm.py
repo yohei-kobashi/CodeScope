@@ -43,8 +43,17 @@ def parse_arguments() -> argparse.Namespace:
                         help='Optional vLLM scheduler token budget per iteration.')
     parser.add_argument('--max_num_seqs', default=None, type=int,
                         help='Optional maximum number of active sequences in vLLM.')
+    parser.add_argument('--kv_cache_dtype', default='auto',
+                        choices=('auto', 'fp8', 'fp8_e4m3'),
+                        help='vLLM KV-cache dtype. FP8 requires supported hardware.')
+    parser.add_argument('--enable_chunked_prefill', action='store_true',
+                        help='Enable vLLM chunked prefill.')
     parser.add_argument('--enable_prefix_caching', action='store_true',
                         help='Enable vLLM prefix caching.')
+    parser.add_argument('--language_model_only', action='store_true',
+                        help='Skip Qwen3.5 vision encoder loading/profiling for text-only inference.')
+    parser.add_argument('--mtp_tokens', default=0, type=int,
+                        help='Qwen3.5 MTP speculative tokens (0 disables speculative decoding).')
     parser.add_argument('--trust_remote_code', action='store_true',
                         help='Allow execution of remote code during model loading.')
     parser.add_argument('--data_load_name', default='code_translation_data.jsonl', type=str)
@@ -71,6 +80,10 @@ def parse_arguments() -> argparse.Namespace:
                         help='Seed for --random_sample_ratio.')
     parser.add_argument('--use_sft_prompt_template', action='store_true',
                         help='Use chat-style SFT prompt template requiring tokenizer.apply_chat_template.')
+    parser.add_argument('--enable_thinking', action='store_true',
+                        help='Enable Qwen thinking mode in the SFT chat template.')
+    parser.add_argument('--seed', default=42, type=int,
+                        help='Per-request vLLM sampling seed.')
     parser.add_argument('--enforce_eager', nargs='?', default=None, type=_str_to_bool,
                         const=True,
                         help='Optionally force vLLM to execute in eager mode. '
@@ -120,7 +133,8 @@ def canonical_language_name(name: str) -> str:
     return shortcode_to_markdowncode.get(key, key.capitalize())
 
 
-def build_prompt(example: Dict[str, Any], tokenizer, use_sft_prompt_template: bool) -> str:
+def build_prompt(example: Dict[str, Any], tokenizer, use_sft_prompt_template: bool,
+                 enable_thinking: bool = False) -> str:
     source_lang_key = (example.get('source_lang_cluster') or '').strip().lower()
     target_lang_key = (example.get('target_lang_cluster') or '').strip().lower()
     source_lang = canonical_language_name(source_lang_key)
@@ -143,11 +157,18 @@ def build_prompt(example: Dict[str, Any], tokenizer, use_sft_prompt_template: bo
                 "content": (
                     "Your task is to carefully translate the following {source_lang_key} code into {target_lang_key}.\n"
                     "The translated code MUST preserve exactly the same functionality as the original.\n\n"
+                    "The translated code MUST remain a complete program and preserve the original standard input and standard output behavior.\n\n"
                     "```{source_lang}\n{source_code}```"
                 ).format(source_lang_key=source_lang_key, target_lang_key=target_lang_key, source_lang=source_lang, source_code=source_code),
             },
         ]
-        chat_prefix = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        chat_template_kwargs = {
+            'tokenize': False,
+            'add_generation_prompt': True,
+        }
+        if 'qwen' in (getattr(tokenizer, 'name_or_path', '') or '').lower():
+            chat_template_kwargs['enable_thinking'] = enable_thinking
+        chat_prefix = tokenizer.apply_chat_template(messages, **chat_template_kwargs)
         suffix = "```{target_lang}\n".format(target_lang=target_lang)
         if suffix and not suffix.endswith("\n"):
             suffix += "\n"
@@ -248,6 +269,9 @@ def reached_max_tokens(sequence: Any, token_count: int, max_tokens: int) -> bool
 
 
 def main() -> None:
+    if args.mtp_tokens < 0:
+        raise ValueError('--mtp_tokens must be non-negative.')
+
     load_path = Path(__file__).parent.parent.parent / Path('data') / Path(args.data_load_name)
     save_path = Path(__file__).parent.parent / Path('result') / Path(args.result_save_name)
 
@@ -281,8 +305,19 @@ def main() -> None:
         llm_kwargs['max_num_batched_tokens'] = args.max_num_batched_tokens
     if args.max_num_seqs is not None:
         llm_kwargs['max_num_seqs'] = args.max_num_seqs
+    if args.kv_cache_dtype != 'auto':
+        llm_kwargs['kv_cache_dtype'] = args.kv_cache_dtype
+    if args.enable_chunked_prefill:
+        llm_kwargs['enable_chunked_prefill'] = True
     if args.enable_prefix_caching:
         llm_kwargs['enable_prefix_caching'] = True
+    if args.language_model_only:
+        llm_kwargs['language_model_only'] = True
+    if args.mtp_tokens:
+        llm_kwargs['speculative_config'] = {
+            'method': 'qwen3_next_mtp',
+            'num_speculative_tokens': args.mtp_tokens,
+        }
 
     llm = LLM(**llm_kwargs)
     tokenizer = llm.get_tokenizer()
@@ -291,7 +326,12 @@ def main() -> None:
 
     prompts: List[str] = []
     for example in records:
-        prompt = build_prompt(example, tokenizer, args.use_sft_prompt_template)
+        prompt = build_prompt(
+            example,
+            tokenizer,
+            args.use_sft_prompt_template,
+            args.enable_thinking,
+        )
         prompts.append(prompt)
 
     sampling_params = SamplingParams(
@@ -301,6 +341,7 @@ def main() -> None:
         min_p=args.min_p,
         presence_penalty=args.presence_penalty,
         repetition_penalty=args.repetition_penalty,
+        seed=args.seed,
         max_tokens=args.max_new_tokens,
         n=args.candidate_num,
     )
