@@ -189,50 +189,6 @@ def count_tokens(tokenizer, text: str) -> int:
     return len(token_ids)
 
 
-def _normalize_dtype_name(dtype_value: Any) -> Optional[str]:
-    if dtype_value is None:
-        return None
-    if isinstance(dtype_value, str):
-        dtype_str = dtype_value
-    else:
-        dtype_str = str(dtype_value)
-    dtype_str = dtype_str.replace('torch.', '').replace('torch', '').strip().lower()
-    if dtype_str == 'float':
-        dtype_str = 'float32'
-    return dtype_str or None
-
-
-def infer_model_dtype(model_id: str, dtype_arg: Optional[str], trust_remote_code: bool,
-                      cache_dir: Optional[str]) -> Optional[str]:
-    if dtype_arg and dtype_arg.lower() != 'auto':
-        return dtype_arg
-
-    try:
-        from transformers import AutoConfig  # type: ignore
-    except Exception:
-        logging.warning('transformers not available; defaulting dtype to float16.')
-        return 'float16'
-
-    try:
-        config = AutoConfig.from_pretrained(
-            model_id,
-            trust_remote_code=trust_remote_code,
-            cache_dir=cache_dir,
-        )
-    except Exception as exc:
-        logging.warning('Failed to load model config for dtype detection (%s); defaulting to float16.', exc)
-        return 'float16'
-
-    config_dtype = getattr(config, 'torch_dtype', None) or getattr(config, 'dtype', None)
-    normalized = _normalize_dtype_name(config_dtype)
-    if not normalized:
-        logging.warning('Model config does not specify torch_dtype; defaulting to float16.')
-        return 'float16'
-
-    logging.info('Auto-detected dtype=%s from model config.', normalized)
-    return normalized
-
-
 def batched(iterable: Sequence[Any], batch_size: int) -> Iterable[Sequence[Any]]:
     for start_idx in range(0, len(iterable), batch_size):
         yield iterable[start_idx:start_idx + batch_size]
@@ -280,23 +236,16 @@ def main() -> None:
     records: List[Dict[str, Any]] = dataset.to_list()
     records = sample_records(records, args.random_sample_ratio, args.random_sample_seed)
 
-    resolved_dtype = infer_model_dtype(
-        args.model,
-        args.dtype,
-        args.trust_remote_code,
-        args.download_dir,
-    )
-    args.dtype = resolved_dtype
-
     llm_kwargs: Dict[str, Any] = {
         'model': args.model,
         'tokenizer': args.tokenizer or args.model,
         'tensor_parallel_size': args.tensor_parallel_size,
         'trust_remote_code': args.trust_remote_code,
-        'dtype': args.dtype,
         'max_model_len': args.max_model_len,
         'download_dir': args.download_dir,
     }
+    if args.dtype and args.dtype.lower() != 'auto':
+        llm_kwargs['dtype'] = args.dtype
     if args.enforce_eager is not None:
         llm_kwargs['enforce_eager'] = args.enforce_eager
     if args.gpu_memory_utilization is not None:
@@ -319,6 +268,7 @@ def main() -> None:
             'num_speculative_tokens': args.mtp_tokens,
         }
 
+    logging.info('vLLM engine arguments: %s', llm_kwargs)
     llm = LLM(**llm_kwargs)
     tokenizer = llm.get_tokenizer()
     if tokenizer and tokenizer.pad_token_id is None and tokenizer.eos_token_id is not None:
