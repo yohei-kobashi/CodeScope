@@ -75,7 +75,7 @@ EVALUATION_RUNS=(
 
 for run_name in "${EVALUATION_RUNS[@]}"; do
   input_path="result/code_translation_eval_${run_name}.jsonl"
-  output_path="result/eval_${run_name}_singularity.json"
+  output_path="result/eval_${run_name}_singularity_fixed.json"
 
   if [[ ! -s "$input_path" ]]; then
     echo "Missing or empty inference result: ${input_path}" >&2

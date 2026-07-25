@@ -292,14 +292,45 @@ def remove_runtime_noise(text: str) -> str:
 
 
 def strip_code_block_wrappers(source_code: str) -> str:
-    """Remove markdown-style code fences and surrounding text."""
+    """Extract generated code from Markdown fences without dropping raw-code prefixes.
+
+    SFT prompts already end with an opening target-language fence, so the model
+    completion commonly contains raw code followed by only the closing fence
+    and optional explanatory prose.  Treating that first observed fence as an
+    opening fence discards the actual code.
+    """
     if not source_code:
         return ""
-    source_code = re.sub(r"```\s*[#\*]* *(?:Explanation|Note).*", "", source_code, flags=re.DOTALL)
-    stripped = re.sub(r"^.*?```[^\n]*\n", "", source_code, flags=re.DOTALL)
-    stripped = re.sub(r"```\n.*$", "", stripped, flags=re.DOTALL)
-    stripped = stripped.replace("```", "")
-    return stripped.strip()
+
+    text = source_code.replace("\r\n", "\n").replace("\r", "\n")
+    opening = re.match(r"^\s*```[^\n]*\n", text)
+    if opening:
+        fenced_body = text[opening.end():]
+        closing = re.search(r"(?m)^\s*```\s*$", fenced_body)
+        return (fenced_body[:closing.start()] if closing else fenced_body).strip()
+
+    # Conventional prose may precede a language-tagged opening fence.
+    opening = re.search(r"(?m)^\s*```\S[^\n]*\n", text)
+    if opening:
+        fenced_body = text[opening.end():]
+        closing = re.search(r"(?m)^\s*```\s*$", fenced_body)
+        return (fenced_body[:closing.start()] if closing else fenced_body).strip()
+
+    # With an opening fence supplied by the prompt, the completion starts
+    # directly with code.  Its first standalone fence is therefore a closing
+    # fence; discard that fence and all prose after it.
+    closing = re.search(r"(?m)^\s*```\s*$", text)
+    if closing:
+        return text[:closing.start()].strip()
+
+    # Fallback for prose followed by an unlabelled fenced block.
+    opening = re.search(r"(?m)^\s*```[^\n]*\n", text)
+    if opening:
+        fenced_body = text[opening.end():]
+        closing = re.search(r"(?m)^\s*```\s*$", fenced_body)
+        return (fenced_body[:closing.start()] if closing else fenced_body).strip()
+
+    return text.strip()
 
 
 def preprocess_source_code(raw_code: str | None) -> str:
