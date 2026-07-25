@@ -16,6 +16,7 @@ import ast
 import os
 import sys
 import math
+import pickle
 import re
 import random
 import subprocess
@@ -1105,7 +1106,7 @@ def exe_main():
     else:
         lang_hint = jsonl_path.split(".")[0].split("_")[-1]
 
-    code_sum, correct_sum = 0, 0
+    code_sum, correct_sum, invalid_sum = 0, 0, 0
     output_dict = {"accepted": {}, "wrong": {}, "error": {}, "invalid": {}}
     prepared_languages: MutableSet[str] = set()
     group_results: Dict[Tuple[str, str], List[bool]] = defaultdict(list)
@@ -1124,6 +1125,49 @@ def exe_main():
         "invalid_num": 0,
     })
     prepared_lock = threading.Lock()
+    checkpoint_path = args.checkpoint_path or f"{args.output_path}.checkpoint.pkl"
+    completed_line_indices: set[int] = set()
+
+    def save_checkpoint() -> None:
+        state = {
+            "jsonl_path": os.path.abspath(jsonl_path),
+            "jsonl_size": os.path.getsize(jsonl_path),
+            "completed_line_indices": completed_line_indices,
+            "code_sum": code_sum,
+            "correct_sum": correct_sum,
+            "invalid_sum": invalid_sum,
+            "output_dict": output_dict,
+            "group_results": dict(group_results),
+            "per_language_totals": dict(per_language_totals),
+            "per_lang_pair_totals": dict(per_lang_pair_totals),
+        }
+        temp_path = f"{checkpoint_path}.tmp"
+        os.makedirs(os.path.dirname(os.path.abspath(checkpoint_path)), exist_ok=True)
+        with open(temp_path, "wb") as checkpoint_file:
+            pickle.dump(state, checkpoint_file, protocol=pickle.HIGHEST_PROTOCOL)
+            checkpoint_file.flush()
+            os.fsync(checkpoint_file.fileno())
+        os.replace(temp_path, checkpoint_path)
+
+    if args.resume and os.path.exists(checkpoint_path):
+        with open(checkpoint_path, "rb") as checkpoint_file:
+            state = pickle.load(checkpoint_file)
+        if (state.get("jsonl_path") != os.path.abspath(jsonl_path)
+                or state.get("jsonl_size") != os.path.getsize(jsonl_path)):
+            raise RuntimeError(
+                f"Checkpoint does not match input file: {checkpoint_path}. "
+                "Remove it or use --no-resume to start over."
+            )
+        completed_line_indices.update(state["completed_line_indices"])
+        code_sum = state["code_sum"]
+        correct_sum = state["correct_sum"]
+        invalid_sum = state["invalid_sum"]
+        output_dict = state["output_dict"]
+        group_results.update(state["group_results"])
+        per_language_totals.update(state["per_language_totals"])
+        per_lang_pair_totals.update(state["per_lang_pair_totals"])
+        print(f"[Resume] Loaded {len(completed_line_indices)} completed entries "
+              f"from {checkpoint_path}")
 
     def ensure_language_prepared(lang: str):
         normalized = normalize_language_key(lang)
@@ -1232,23 +1276,27 @@ def exe_main():
         }
 
     processed_any = False
-    futures = []
+    futures = {}
     total_entries = 0
-    processed_entries = 0
-    invalid_sum = 0
+    processed_entries = len(completed_line_indices)
     aborted = False
     with concurrent.futures.ThreadPoolExecutor(max_workers=args.max_workers) as executor:
         for line_idx, line in iter_jsonl_entries(jsonl_path, args.random_sample_size, args.random_sample_seed):
             processed_any = True
-            futures.append(executor.submit(process_line, line_idx, line))
+            total_entries += 1
+            if line_idx in completed_line_indices:
+                continue
+            future = executor.submit(process_line, line_idx, line)
+            futures[future] = line_idx
 
-        total_entries = len(futures)
         for future in concurrent.futures.as_completed(futures):
             result = future.result()
+            line_idx = futures[future]
             code_sum += result["code_sum"]
             correct_sum += result["correct_sum"]
             invalid_sum += result["invalid_sum"]
             processed_entries += 1
+            completed_line_indices.add(line_idx)
 
             for key in ("accepted", "wrong", "error", "invalid"):
                 output_dict[key].update(result["output"][key])
@@ -1273,6 +1321,12 @@ def exe_main():
 
             print(f"[Progress] entries {processed_entries}/{total_entries} "
                   f"| done: {code_sum} not accepted: {code_sum - correct_sum}")
+
+            if args.checkpoint_interval > 0 and (
+                    processed_entries % args.checkpoint_interval == 0):
+                save_checkpoint()
+                print(f"[Checkpoint] Saved {processed_entries}/{total_entries} entries "
+                      f"to {checkpoint_path}")
 
             total_attempts = code_sum + invalid_sum
             max_invalid_rate = getattr(args, "max_container_error_rate", None)
@@ -1345,6 +1399,8 @@ def exe_main():
 
     with open(args.output_path, 'w', encoding='utf-8') as f:
         json.dump(output_dict, f)
+    if os.path.exists(checkpoint_path):
+        os.remove(checkpoint_path)
 
     if aborted:
         raise SystemExit(2)
@@ -1354,6 +1410,12 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--jsonl_path', type=str, default="program_synthesis_eval_palm_d.jsonl")
     parser.add_argument('--output_path', type=str, default="./results/executed_result.json")
+    parser.add_argument('--resume', action=argparse.BooleanOptionalAction, default=True,
+                        help="Resume from an atomic checkpoint (default: enabled).")
+    parser.add_argument('--checkpoint_path', type=str, default=None,
+                        help="Checkpoint path (default: <output_path>.checkpoint.pkl).")
+    parser.add_argument('--checkpoint_interval', type=int, default=25,
+                        help="Save a checkpoint after this many completed entries; 0 disables.")
     parser.add_argument('--singularity_image', type=str, required=True,
                         help="Singularity sandbox/SIF path, e.g. multipl-e-eval_sandbox")
     parser.add_argument('--singularity_runtime', type=str, default="singularity",
