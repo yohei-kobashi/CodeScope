@@ -35,8 +35,12 @@ def main() -> None:
     pattern = "eval_*_singularity_fixed.json"
     for result_path in sorted(args.result_dir.glob(pattern)):
         result = json.loads(result_path.read_text(encoding="utf-8"))
-        invalid_ids = set(result.get("invalid", {}))
-        if not invalid_ids:
+        invalid_records = result.get("invalid", {})
+        invalid_keys = {
+            (submission_id, str(details.get("id")))
+            for submission_id, details in invalid_records.items()
+        }
+        if not invalid_keys:
             continue
 
         run_name = result_path.name.removeprefix("eval_").removesuffix(
@@ -50,13 +54,17 @@ def main() -> None:
         with input_path.open(encoding="utf-8") as input_file:
             for line in input_file:
                 record = json.loads(line)
-                if submission_ids(record) & invalid_ids:
+                record_keys = {
+                    (submission_id, str(record.get("id")))
+                    for submission_id in submission_ids(record)
+                }
+                if record_keys & invalid_keys:
                     selected.append(line)
 
-        if len(selected) != len(invalid_ids):
+        if len(selected) != len(invalid_keys):
             raise RuntimeError(
                 f"{run_name}: found {len(selected)} records for "
-                f"{len(invalid_ids)} Invalid submission IDs"
+                f"{len(invalid_keys)} Invalid submissions"
             )
         subset_path.write_text("".join(selected), encoding="utf-8")
         manifest.append({
