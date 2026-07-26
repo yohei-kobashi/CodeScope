@@ -995,6 +995,9 @@ def exe_question(content, lang, output_dict, source_code: str, translation_label
                     debug_info=debug_info,
                 )
             except SingularityEvaluationError as exc:
+                error_detail = str(exc)
+                if exc.stderr:
+                    error_detail = f"{error_detail}\nstderr:\n{exc.stderr}"
                 output_dict, invalid_case = record_failed_case(
                     output_dict,
                     src_uid,
@@ -1003,7 +1006,7 @@ def exe_question(content, lang, output_dict, source_code: str, translation_label
                     id,
                     None,
                     None,
-                    str(exc),
+                    error_detail,
                     "SINGULARITY_ERROR",
                 )
                 return output_dict, 1, invalid_case
