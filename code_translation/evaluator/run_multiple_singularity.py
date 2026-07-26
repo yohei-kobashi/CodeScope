@@ -982,61 +982,67 @@ def exe_question(content, lang, output_dict, source_code: str, translation_label
     candidate_failures = []
 
     for lang_key in lang_candidates:
-        debug_info: dict = {}
-        try:
-            responses, debug_info = invoke_singularity_batch(
-                lang_key,
-                source_code,
-                prepared_testcases,
-                submission_id,
-                verbose=verbose_enabled,
-                debug_info=debug_info,
-            )
-        except SingularityEvaluationError as exc:
-            output_dict, invalid_case = record_failed_case(
-                output_dict,
-                src_uid,
-                submission_id,
-                difficulty,
-                id,
-                None,
-                None,
-                str(exc),
-                "SINGULARITY_ERROR",
-            )
-            return output_dict, 1, invalid_case
-        except func_timeout.exceptions.FunctionTimedOut:
-            print("Time Limit Exceeded")
-            output_dict["error"] = record_result(output_dict["error"], src_uid, submission_id, difficulty, id, None,
-                                                 None, "Time Limit Exceeded", "RUNTIME_ERROR")
-            return output_dict, 1, 0
-        except Exception as exc:
-            candidate_failures.append({
-                "lang": lang_key,
-                "case_index": 0,
-                "answer": None,
-                "output_value": None,
-                "outerr": str(exc),
-                "errtype": "RUNTIME_ERROR",
-            })
-            continue
-
-        if verbose_enabled:
-            singularity_image = debug_info.get("singularity_image")
-            if singularity_image:
-                print(f"[Verbose] Singularity image: {singularity_image}")
-            print(f"[Verbose] Batch size: {debug_info.get('batch_size')}")
-            payload = debug_info.get("payload")
-            if payload is not None:
-                print("[Verbose] Payload:")
-                print(json.dumps(payload, indent=2, ensure_ascii=False))
-            response_body = debug_info.get("response_body")
-            if response_body is not None:
-                print("[Verbose] Response body:")
-                print(response_body)
-
         first_failure = None
-        for case_index, (response, testcase) in enumerate(zip(responses, prepared_testcases)):
+        for case_index, testcase in enumerate(prepared_testcases):
+            debug_info: dict = {}
+            try:
+                responses, debug_info = invoke_singularity_batch(
+                    lang_key,
+                    source_code,
+                    [testcase],
+                    submission_id,
+                    verbose=verbose_enabled,
+                    debug_info=debug_info,
+                )
+            except SingularityEvaluationError as exc:
+                output_dict, invalid_case = record_failed_case(
+                    output_dict,
+                    src_uid,
+                    submission_id,
+                    difficulty,
+                    id,
+                    None,
+                    None,
+                    str(exc),
+                    "SINGULARITY_ERROR",
+                )
+                return output_dict, 1, invalid_case
+            except (func_timeout.exceptions.FunctionTimedOut, subprocess.TimeoutExpired):
+                first_failure = {
+                    "lang": lang_key,
+                    "case_index": case_index,
+                    "answer": testcase["answer"],
+                    "output_value": None,
+                    "outerr": "Time Limit Exceeded",
+                    "errtype": "TIMEOUT",
+                }
+                break
+            except Exception as exc:
+                first_failure = {
+                    "lang": lang_key,
+                    "case_index": case_index,
+                    "answer": testcase["answer"],
+                    "output_value": None,
+                    "outerr": str(exc),
+                    "errtype": "RUNTIME_ERROR",
+                }
+                break
+
+            if verbose_enabled:
+                singularity_image = debug_info.get("singularity_image")
+                if singularity_image:
+                    print(f"[Verbose] Singularity image: {singularity_image}")
+                print(f"[Verbose] Batch size: {debug_info.get('batch_size')}")
+                payload = debug_info.get("payload")
+                if payload is not None:
+                    print("[Verbose] Payload:")
+                    print(json.dumps(payload, indent=2, ensure_ascii=False))
+                response_body = debug_info.get("response_body")
+                if response_body is not None:
+                    print("[Verbose] Response body:")
+                    print(response_body)
+
+            response = responses[0]
             result = classify_response(response)
             if result["err"] == 0:
                 continue
