@@ -60,6 +60,10 @@ def summarize(result_dir: Path, retry_dir: Path) -> list[dict]:
     input_paths = sorted(
         result_dir.glob("code_translation_eval_*_max8192_*seed42.jsonl")
     )
+    input_paths = [
+        path for path in input_paths
+        if not ("_thinking_" in path.name and "_pp0_" in path.name)
+    ]
     for input_path in input_paths:
         run_name = input_path.name.removeprefix("code_translation_eval_").removesuffix(
             ".jsonl"
@@ -183,7 +187,7 @@ def write_markdown(path: Path, rows: list[dict]) -> None:
         "",
         "## 比較対象",
         "",
-        "今回比較した生成コードは、次の16個の推論結果に含まれるコードです。",
+        f"今回比較した生成コードは、次の{len(rows)}個の推論結果に含まれるコードです。",
         "",
         "| Model | Training | Think | Penalty setting | Presence penalty | Inference result |",
         "|---|---|---:|---|---:|---|",
@@ -200,7 +204,8 @@ def write_markdown(path: Path, rows: list[dict]) -> None:
         "",
         "全設定で最大生成長は8192、seedは42です。Think Onは`thinking`、"
         "Think Offは`instruct`に対応します。thinkingでは`defaultpp`と"
-        "`pp0`のどちらもpresence penaltyは0.0です。",
+        "`pp0`のどちらもpresence penaltyは0.0となるため、重複条件の評価を"
+        "避けて`defaultpp`のみを代表として掲載しています。",
         "",
         "## 評価方法",
         "",

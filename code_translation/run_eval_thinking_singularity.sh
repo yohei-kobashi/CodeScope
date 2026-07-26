@@ -22,13 +22,9 @@ max_inflight_per_lang="${MAX_INFLIGHT_PER_LANG:-8}"
 
 runs=(
   "qwen3.5_4b_thinking_max8192_defaultpp_seed42"
-  "qwen3.5_4b_thinking_max8192_pp0_seed42"
   "qwen3.5_9b_thinking_max8192_defaultpp_seed42"
-  "qwen3.5_9b_thinking_max8192_pp0_seed42"
   "qwen3.5_4b_grpo_0702_reward35b_nothink_step100_thinking_max8192_defaultpp_seed42"
-  "qwen3.5_4b_grpo_0702_reward35b_nothink_step100_thinking_max8192_pp0_seed42"
   "qwen3.5_9b_grpo_0702_reward35b_nothink_step100_thinking_max8192_defaultpp_seed42"
-  "qwen3.5_9b_grpo_0702_reward35b_nothink_step100_thinking_max8192_pp0_seed42"
 )
 
 if [[ ! -e "$singularity_image" ]]; then
