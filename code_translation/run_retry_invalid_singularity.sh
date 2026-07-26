@@ -12,6 +12,7 @@ cd code_translation
 export MULTIPLE_E_EVALUATION_DIR="${HOME}/MultiPL-E/evaluation"
 image="${HOME}/MultiPL-E/multipl-e-eval_sandbox"
 retry_dir="result/invalid_retries"
+retry_request_timeout="${RETRY_REQUEST_TIMEOUT:-60}"
 
 python evaluator/prepare_invalid_retries.py \
   --result-dir result \
@@ -30,7 +31,7 @@ for item in json.load(open("result/invalid_retries/manifest.json")):
     --singularity_image "$image" \
     --singularity_runtime singularity \
     --singularity_pwd /code \
-    --request_timeout 900 \
+    --request_timeout "$retry_request_timeout" \
     --compile_timeout 120 \
     --max_workers 8 \
     --max_inflight_total 8 \
