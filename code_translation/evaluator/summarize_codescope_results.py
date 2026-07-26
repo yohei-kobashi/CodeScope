@@ -24,19 +24,21 @@ def parse_run_name(run_name: str) -> dict[str, object]:
     if not size_match:
         raise ValueError(f"Cannot determine model size from run name: {run_name}")
 
+    mode = "thinking" if "_thinking_" in run_name else "instruct"
     if "_pp0_" in run_name:
         penalty_label = "pp0"
         presence_penalty = 0.0
     elif "_defaultpp_" in run_name:
         penalty_label = "defaultpp"
-        presence_penalty = 1.5
+        presence_penalty = 0.0 if mode == "thinking" else 1.5
     else:
         raise ValueError(f"Cannot determine presence penalty from run name: {run_name}")
 
     return {
         "model": f"Qwen3.5-{size_match.group(1).upper()}",
         "training": "GRPO" if "_grpo_" in run_name else "Original",
-        "mode": "thinking" if "_thinking_" in run_name else "instruct",
+        "mode": mode,
+        "think": "On" if mode == "thinking" else "Off",
         "max_tokens": 8192 if "_max8192_" in run_name else None,
         "penalty_label": penalty_label,
         "presence_penalty": presence_penalty,
@@ -55,11 +57,38 @@ def retry_counts(retry: dict) -> dict[str, int]:
 
 def summarize(result_dir: Path, retry_dir: Path) -> list[dict]:
     rows = []
-    for result_path in sorted(result_dir.glob(f"{RESULT_PREFIX}*{RESULT_SUFFIX}")):
-        run_name = result_path.name.removeprefix(RESULT_PREFIX).removesuffix(RESULT_SUFFIX)
-        input_path = result_dir / f"code_translation_eval_{run_name}.jsonl"
-        if not input_path.is_file():
-            raise FileNotFoundError(f"Missing inference JSONL: {input_path}")
+    input_paths = sorted(
+        result_dir.glob("code_translation_eval_*_max8192_*seed42.jsonl")
+    )
+    for input_path in input_paths:
+        run_name = input_path.name.removeprefix("code_translation_eval_").removesuffix(
+            ".jsonl"
+        )
+        result_path = result_dir / f"{RESULT_PREFIX}{run_name}{RESULT_SUFFIX}"
+        total = count_jsonl(input_path)
+        metadata = parse_run_name(run_name)
+
+        if not result_path.is_file():
+            rows.append({
+                "run_name": run_name,
+                **metadata,
+                "evaluation_status": "not_evaluated",
+                "total": total,
+                "original_correct": None,
+                "original_accuracy_all": None,
+                "original_invalid": None,
+                "retry_accepted": None,
+                "retry_wrong_answer": None,
+                "retry_error": None,
+                "retry_invalid": None,
+                "corrected_correct": None,
+                "corrected_failed": None,
+                "corrected_accuracy": None,
+                "accounting_gap": None,
+                "result_path": None,
+                "retry_path": None,
+            })
+            continue
 
         result = json.loads(result_path.read_text(encoding="utf-8"))
         info = result.get("info", {})
@@ -93,7 +122,6 @@ def summarize(result_dir: Path, retry_dir: Path) -> list[dict]:
                 "invalid": 0,
             }
 
-        total = count_jsonl(input_path)
         original_correct = int(info["correct_sum"])
         original_code_sum = int(info["code_sum"])
         corrected_correct = original_correct + retry_summary["accepted"]
@@ -103,7 +131,8 @@ def summarize(result_dir: Path, retry_dir: Path) -> list[dict]:
 
         row = {
             "run_name": run_name,
-            **parse_run_name(run_name),
+            **metadata,
+            "evaluation_status": "completed",
             "total": total,
             "original_correct": original_correct,
             "original_accuracy_all": original_correct / total if total else 0.0,
@@ -125,6 +154,7 @@ def summarize(result_dir: Path, retry_dir: Path) -> list[dict]:
         key=lambda row: (
             int(str(row["model"]).split("-")[-1].removesuffix("B")),
             0 if row["training"] == "Original" else 1,
+            0 if row["think"] == "Off" else 1,
             -float(row["presence_penalty"]),
         )
     )
@@ -147,19 +177,22 @@ def write_markdown(path: Path, rows: list[dict]) -> None:
         "",
         "今回比較した生成コードは、次の8つの推論結果に含まれるコードです。",
         "",
-        "| Model | Training | Presence penalty | Inference result |",
-        "|---|---|---:|---|",
+        "| Model | Training | Think | Presence penalty | Inference result |",
+        "|---|---|---:|---:|---|",
     ]
     for row in rows:
         inference_name = f"code_translation_eval_{row['run_name']}.jsonl"
         lines.append(
-            f"| {row['model']} | {row['training']} | {row['presence_penalty']:.1f} "
+            f"| {row['model']} | {row['training']} | {row['think']} "
+            f"| {row['presence_penalty']:.1f} "
             f"| `{inference_name}` |"
         )
 
     lines.extend([
         "",
-        "全設定でmodeは`instruct`、最大生成長は8192、seedは42です。",
+        "全設定で最大生成長は8192、seedは42です。Think Onは`thinking`、"
+        "Think Offは`instruct`に対応します。thinkingでは`defaultpp`と"
+        "`pp0`のどちらもpresence penaltyは0.0です。",
         "",
         "## 評価方法",
         "",
@@ -178,27 +211,21 @@ def write_markdown(path: Path, rows: list[dict]) -> None:
         "",
         "## 集計結果",
         "",
-        "| Model | Training | Presence penalty | Correct / Total | Accuracy | "
-        "Original Invalid | Retry result (A/W/E/I) | Accounting gap |",
-        "|---|---|---:|---:|---:|---:|---:|---:|",
+        "| Model | Training | Think | Presence penalty | Correct / Total | Accuracy |",
+        "|---|---|---:|---:|---:|---:|",
     ])
     for row in rows:
-        retry_text = (
-            f"{row['retry_accepted']}/{row['retry_wrong_answer']}/"
-            f"{row['retry_error']}/{row['retry_invalid']}"
-        )
+        if row["evaluation_status"] == "completed":
+            result_text = f"{row['corrected_correct']} / {row['total']}"
+            accuracy_text = f"{100 * row['corrected_accuracy']:.2f}%"
+        else:
+            result_text = "—"
+            accuracy_text = "—"
         lines.append(
-            f"| {row['model']} | {row['training']} | {row['presence_penalty']:.1f} "
-            f"| {row['corrected_correct']} / {row['total']} "
-            f"| {100 * row['corrected_accuracy']:.2f}% "
-            f"| {row['original_invalid']} | {retry_text} | {row['accounting_gap']} |"
+            f"| {row['model']} | {row['training']} | {row['think']} "
+            f"| {row['presence_penalty']:.1f} | {result_text} | {accuracy_text} |"
         )
-    lines.extend([
-        "",
-        "A/W/E/Iは、Invalid再評価におけるAccepted、Wrong Answer、Error、"
-        "Invalidの件数を表します。",
-        "",
-    ])
+    lines.append("")
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(lines), encoding="utf-8")
 
