@@ -183,16 +183,16 @@ def write_markdown(path: Path, rows: list[dict]) -> None:
         "",
         "## 比較対象",
         "",
-        "今回比較した生成コードは、次の8つの推論結果に含まれるコードです。",
+        "今回比較した生成コードは、次の16個の推論結果に含まれるコードです。",
         "",
-        "| Model | Training | Think | Presence penalty | Inference result |",
-        "|---|---|---:|---:|---|",
+        "| Model | Training | Think | Penalty setting | Presence penalty | Inference result |",
+        "|---|---|---:|---|---:|---|",
     ]
     for row in rows:
         inference_name = f"code_translation_eval_{row['run_name']}.jsonl"
         lines.append(
             f"| {row['model']} | {row['training']} | {row['think']} "
-            f"| {row['presence_penalty']:.1f} "
+            f"| {row['penalty_label']} | {row['presence_penalty']:.1f} "
             f"| `{inference_name}` |"
         )
 
@@ -219,8 +219,8 @@ def write_markdown(path: Path, rows: list[dict]) -> None:
         "",
         "## 集計結果",
         "",
-        "| Model | Training | Think | Presence penalty | Correct / Total | Accuracy |",
-        "|---|---|---:|---:|---:|---:|",
+        "| Model | Training | Think | Penalty setting | Presence penalty | Correct / Total | Accuracy |",
+        "|---|---|---:|---|---:|---:|---:|",
     ])
     for row in rows:
         if row["evaluation_status"] == "completed":
@@ -231,7 +231,8 @@ def write_markdown(path: Path, rows: list[dict]) -> None:
             accuracy_text = "—"
         lines.append(
             f"| {row['model']} | {row['training']} | {row['think']} "
-            f"| {row['presence_penalty']:.1f} | {result_text} | {accuracy_text} |"
+            f"| {row['penalty_label']} | {row['presence_penalty']:.1f} "
+            f"| {result_text} | {accuracy_text} |"
         )
     lines.append("")
     path.parent.mkdir(parents=True, exist_ok=True)
