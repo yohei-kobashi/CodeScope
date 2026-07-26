@@ -143,10 +143,45 @@ def write_markdown(path: Path, rows: list[dict]) -> None:
     lines = [
         "# CodeScope evaluation summary",
         "",
+        "## 比較対象",
+        "",
+        "今回比較した生成コードは、次の8つの推論結果に含まれるコードです。",
+        "",
+        "| Model | Training | Presence penalty | Inference result |",
+        "|---|---|---:|---|",
+    ]
+    for row in rows:
+        inference_name = f"code_translation_eval_{row['run_name']}.jsonl"
+        lines.append(
+            f"| {row['model']} | {row['training']} | {row['presence_penalty']:.1f} "
+            f"| `{inference_name}` |"
+        )
+
+    lines.extend([
+        "",
+        "全設定でmodeは`instruct`、最大生成長は8192、seedは42です。",
+        "",
+        "## 評価方法",
+        "",
+        "オリジナルのCodeScopeのGitHubコードでは、生成コードに対する"
+        "入力・出力ペアのうち最初の1組だけをテストします。本評価では、"
+        "各生成コードについて用意された入力・出力ペアをすべて順番にテストし、"
+        "すべてのペアで出力が一致した場合に限り翻訳成功と判定します。",
+        "",
+        "いずれか1組で不一致、コンパイルエラー、実行時エラー、または"
+        "タイムアウトが発生した時点で、その生成コードを失敗として残りの"
+        "ペアの評価を打ち切ります。",
+        "",
+        "Accuracyの分母には、各推論結果JSONLの全行数を固定で使用します。"
+        "また、初回評価でInvalidとなった項目は再評価し、再評価でAcceptedと"
+        "なった項目を正解数へ反映しています。",
+        "",
+        "## 集計結果",
+        "",
         "| Model | Training | Presence penalty | Correct / Total | Accuracy | "
         "Original Invalid | Retry result (A/W/E/I) | Accounting gap |",
         "|---|---|---:|---:|---:|---:|---:|---:|",
-    ]
+    ])
     for row in rows:
         retry_text = (
             f"{row['retry_accepted']}/{row['retry_wrong_answer']}/"
@@ -160,8 +195,8 @@ def write_markdown(path: Path, rows: list[dict]) -> None:
         )
     lines.extend([
         "",
-        "Accuracy uses the inference JSONL line count as a fixed denominator. "
-        "A/W/E/I means Accepted, Wrong Answer, Error, and Invalid in the retry.",
+        "A/W/E/Iは、Invalid再評価におけるAccepted、Wrong Answer、Error、"
+        "Invalidの件数を表します。",
         "",
     ])
     path.parent.mkdir(parents=True, exist_ok=True)
