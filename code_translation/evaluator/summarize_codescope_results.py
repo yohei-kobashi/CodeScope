@@ -81,6 +81,7 @@ def summarize(result_dir: Path, retry_dir: Path) -> list[dict]:
                 "retry_wrong_answer": None,
                 "retry_error": None,
                 "retry_invalid": None,
+                "retry_status": "not_applicable",
                 "corrected_correct": None,
                 "corrected_failed": None,
                 "corrected_accuracy": None,
@@ -102,18 +103,23 @@ def summarize(result_dir: Path, retry_dir: Path) -> list[dict]:
 
         retry_path = retry_dir / f"{run_name}_invalid_retry.json"
         if original_invalid:
-            if not retry_path.is_file():
-                raise FileNotFoundError(
-                    f"{run_name}: {original_invalid} Invalid entries but retry result is missing: "
-                    f"{retry_path}"
-                )
-            retry = json.loads(retry_path.read_text(encoding="utf-8"))
-            retry_summary = retry_counts(retry)
-            if sum(retry_summary.values()) != original_invalid:
-                raise RuntimeError(
-                    f"{run_name}: retry classified {sum(retry_summary.values())} of "
-                    f"{original_invalid} Invalid entries"
-                )
+            if retry_path.is_file():
+                retry = json.loads(retry_path.read_text(encoding="utf-8"))
+                retry_summary = retry_counts(retry)
+                retry_status = "completed"
+                if sum(retry_summary.values()) != original_invalid:
+                    raise RuntimeError(
+                        f"{run_name}: retry classified {sum(retry_summary.values())} of "
+                        f"{original_invalid} Invalid entries"
+                    )
+            else:
+                retry_summary = {
+                    "accepted": 0,
+                    "wrong_answer": 0,
+                    "error": 0,
+                    "invalid": 0,
+                }
+                retry_status = "not_run"
         else:
             retry_summary = {
                 "accepted": 0,
@@ -121,6 +127,7 @@ def summarize(result_dir: Path, retry_dir: Path) -> list[dict]:
                 "error": 0,
                 "invalid": 0,
             }
+            retry_status = "not_needed"
 
         original_correct = int(info["correct_sum"])
         original_code_sum = int(info["code_sum"])
@@ -141,12 +148,13 @@ def summarize(result_dir: Path, retry_dir: Path) -> list[dict]:
             "retry_wrong_answer": retry_summary["wrong_answer"],
             "retry_error": retry_summary["error"],
             "retry_invalid": retry_summary["invalid"],
+            "retry_status": retry_status,
             "corrected_correct": corrected_correct,
             "corrected_failed": total - corrected_correct,
             "corrected_accuracy": corrected_correct / total if total else 0.0,
             "accounting_gap": accounting_gap,
             "result_path": str(result_path),
-            "retry_path": str(retry_path) if original_invalid else None,
+            "retry_path": str(retry_path) if retry_path.is_file() else None,
         }
         rows.append(row)
 
